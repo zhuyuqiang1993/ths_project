@@ -1,0 +1,5 @@
+akshare>=1.14.0
+pandas>=2.0.0
+schedule>=1.2.0
+loguru>=0.7.2
+mysql-connector-python>=8.0.0

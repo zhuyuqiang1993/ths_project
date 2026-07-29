@@ -1,0 +1,18 @@
+2026-07-15 22:16:17.897 | INFO     | __main__:<module>:37 - 定时服务已启动, 每日 18:00 运行
+2026-07-15 22:16:17.897 | INFO     | __main__:<module>:40 - 当前时间: 22:16
+2026-07-15 22:16:17.897 | INFO     | __main__:job:26 - === 定时任务触发 ===
+2026-07-15 22:16:17.898 | INFO     | stock_service:run:28 - 获取全部A股股票列表...
+2026-07-15 22:17:08.663 | ERROR    | __main__:job:30 - 定时任务执行失败: HTTPSConnectionPool(host='82.push2.eastmoney.com', port=443): Read timed out. (read timeout=15)
+2026-07-15 22:17:08.663 | INFO     | __main__:job:31 - === 定时任务结束 ===
+2026-07-15 22:17:22.628 | INFO     | __main__:<module>:37 - 定时服务已启动, 每日 18:00 运行
+2026-07-15 22:17:22.629 | INFO     | __main__:<module>:40 - 当前时间: 22:17
+2026-07-15 22:17:22.629 | INFO     | __main__:job:26 - === 定时任务触发 ===
+2026-07-15 22:17:22.630 | INFO     | stock_service:run:28 - 获取全部A股股票列表...
+2026-07-15 22:17:28.424 | ERROR    | __main__:job:30 - 定时任务执行失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+2026-07-15 22:17:28.424 | INFO     | __main__:job:31 - === 定时任务结束 ===
+2026-07-15 22:18:44.853 | INFO     | __main__:<module>:37 - 定时服务已启动, 每日 18:00 运行
+2026-07-15 22:18:44.854 | INFO     | __main__:<module>:40 - 当前时间: 22:18
+2026-07-15 22:18:44.854 | INFO     | __main__:job:26 - === 定时任务触发 ===
+2026-07-15 22:18:44.854 | INFO     | stock_service:run:28 - 获取全部A股股票列表...
+2026-07-15 22:18:50.862 | ERROR    | __main__:job:30 - 定时任务执行失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+2026-07-15 22:18:50.862 | INFO     | __main__:job:31 - === 定时任务结束 ===
