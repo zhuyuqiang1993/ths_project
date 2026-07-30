@@ -247,21 +247,22 @@ def compute_day_data(candles: pd.DataFrame, target_date: str) -> dict:
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="A股日级数据采集")
-    parser.add_argument("--date", default=None, help="目标日期 YYYY-MM-DD (默认今天)")
-    parser.add_argument("--start", default=None, help="起始日期 YYYY-MM-DD")
-    parser.add_argument("--end", default=None, help="结束日期 YYYY-MM-DD")
-    args = parser.parse_args()
+def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    """获取指定日期/区间的A股日级数据，返回包含MACD的DataFrame。
 
-    if args.date:
-        target_dates = [args.date]
-    elif args.start and args.end:
-        s = datetime.strptime(args.start, "%Y-%m-%d")
-        e = datetime.strptime(args.end, "%Y-%m-%d")
+    Args:
+        start_date: 起始日期 YYYY-MM-DD；与end_date相同或两者均为None时取当天
+        end_date: 结束日期 YYYY-MM-DD
+
+    Returns:
+        包含 date/code/name/board_code/board_name/prev_close/open/.../macd 的DataFrame
+    """
+    if start_date and end_date and start_date != end_date:
+        s = datetime.strptime(start_date, "%Y-%m-%d")
+        e = datetime.strptime(end_date, "%Y-%m-%d")
         target_dates = [(s + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((e - s).days + 1)]
     else:
-        target_dates = [TODAY]
+        target_dates = [start_date or end_date or TODAY]
 
     is_today = len(target_dates) == 1 and target_dates[0] == TODAY
 
@@ -299,13 +300,12 @@ def main():
     # Build rows for each target date
     all_rows = []
     for target_date in target_dates:
-        target_year = str(pd.Timestamp(target_date).year)
         logger.info(f"处理日期 {target_date}...")
 
         if is_today:
             quotes_df = fetch_all_quotes(stock_list)
             if quotes_df.empty:
-                return
+                return pd.DataFrame()
             for _, q in quotes_df.iterrows():
                 c = q["code"]
                 candle = candles_cache.get(c)
@@ -342,7 +342,7 @@ def main():
 
     if not all_rows:
         logger.error("无数据可输出")
-        return
+        return pd.DataFrame()
 
     result = pd.DataFrame(all_rows)
     output_cols = [
@@ -364,8 +364,17 @@ def main():
     print(f"\n成功: {len(result)} 条记录, {result['date'].nunique()} 个交易日")
     print(f"输出: {file_path}")
     print(result.head(10).to_string())
-
     logger.info("===== A股日级数据采集结束 =====")
+
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description="A股日级数据采集")
+    parser.add_argument("--start_date", default=None, help="起始日期 YYYY-MM-DD")
+    parser.add_argument("--end_date", default=None, help="结束日期 YYYY-MM-DD")
+    args = parser.parse_args()
+    run(start_date=args.start_date, end_date=args.end_date)
 
 
 if __name__ == "__main__":
