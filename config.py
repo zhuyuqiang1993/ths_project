@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List
@@ -30,6 +31,10 @@ class Config:
     mysql_user: str = "root"
     mysql_password: str = "ths_project_2024"
     mysql_database: str = "stock_db"
+
+    deepseek_api_key: str = os.environ.get("DS_APP_KEY", "")
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
 
     @property
     def stock_list_path(self) -> Path:
