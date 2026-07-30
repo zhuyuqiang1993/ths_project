@@ -3,7 +3,8 @@ import ssl
 import sys
 import time
 import re
-from datetime import datetime
+import argparse
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
@@ -49,7 +50,8 @@ _SESSION = requests.Session()
 _SESSION.verify = False
 _SESSION.trust_env = True
 
-TODAY = datetime.now().strftime("%Y%m%d")
+TODAY = datetime.now().strftime("%Y-%m-%d")
+TODAY_FILE = datetime.now().strftime("%Y%m%d")
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -174,9 +176,10 @@ def _get_ths_v():
     return ctx.call("v")
 
 
-def fetch_history_macd(code: str, v_code: str) -> dict:
+def fetch_stock_candles(code: str, v_code: str, year: str = "2026") -> Optional[pd.DataFrame]:
+    """Fetch full year candles for a stock from Tonghuashun K-line API."""
     try:
-        url = f"https://d.10jqka.com.cn/v4/line/hs_{code}/01/2026.js"
+        url = f"https://d.10jqka.com.cn/v4/line/hs_{code}/01/{year}.js"
         headers = {
             "hexin-v": v_code,
             "User-Agent": "Mozilla/5.0",
@@ -185,81 +188,180 @@ def fetch_history_macd(code: str, v_code: str) -> dict:
         r = requests.get(url, headers=headers, cookies={"v": v_code}, timeout=10)
         m = re.search(r'"data":"([^"]+)"', r.text)
         if not m:
-            return {"macd": None, "signal": None, "hist": None}
-        rows = m.group(1).split(";")
-        if len(rows) < 26:
-            return {"macd": None, "signal": None, "hist": None}
+            return None
         out = []
-        for row in rows:
+        for row in m.group(1).split(";"):
             parts = row.split(",")
-            if len(parts) >= 5:
+            if len(parts) >= 7:
+                volume = int(float(parts[5])) if parts[5] else 0
+                amount = float(parts[6]) if parts[6] else 0
                 out.append([parts[0], float(parts[1]), float(parts[2]),
-                            float(parts[3]), float(parts[4])])
-        if len(out) < 26:
-            return {"macd": None, "signal": None, "hist": None}
-        df = pd.DataFrame(out[-60:], columns=["date", "open", "high", "low", "close"])
-        return calc_macd(df)
+                            float(parts[3]), float(parts[4]),
+                            volume, amount])
+        if not out:
+            return None
+        df = pd.DataFrame(out, columns=["date", "open", "high", "low", "close", "volume", "amount"])
+        df["date"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce")
+        df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        return df
     except Exception:
-        pass
-    return {"macd": None, "signal": None, "hist": None}
+        return None
+
+
+def compute_day_data(candles: pd.DataFrame, target_date: str) -> dict:
+    """Extract one date's OHLCV and compute MACD from trailing data."""
+    td = pd.Timestamp(target_date)
+    before = candles[candles["date"] <= td]
+    if len(before) < 2:
+        return {"open": None, "high": None, "low": None, "close": None,
+                "prev_close": None, "pct_chg": None, "volume": None, "amount": None,
+                "macd": None, "signal": None, "hist": None}
+
+    today_row = before[before["date"] == td]
+    if today_row.empty:
+        return {"open": None, "high": None, "low": None, "close": None,
+                "prev_close": None, "pct_chg": None, "volume": None, "amount": None,
+                "macd": None, "signal": None, "hist": None}
+    row = today_row.iloc[-1]
+
+    close_val = float(row["close"])
+    prev_close_val = float(before.iloc[-2]["close"]) if len(before) >= 2 else close_val
+    pct_chg = round((close_val - prev_close_val) / prev_close_val * 100, 2) if prev_close_val else 0
+
+    macd = {"macd": None, "signal": None, "hist": None}
+    if len(before) >= 26:
+        macd = calc_macd(before.tail(60))
+
+    return {
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": close_val,
+        "prev_close": prev_close_val,
+        "pct_chg": pct_chg,
+        "volume": int(float(row["volume"])),
+        "amount": float(row["amount"]),
+        "macd": macd["macd"],
+        "signal": macd["signal"],
+        "hist": macd["hist"],
+    }
 
 
 def main():
+    parser = argparse.ArgumentParser(description="A股日级数据采集")
+    parser.add_argument("--date", default=None, help="目标日期 YYYY-MM-DD (默认今天)")
+    parser.add_argument("--start", default=None, help="起始日期 YYYY-MM-DD")
+    parser.add_argument("--end", default=None, help="结束日期 YYYY-MM-DD")
+    args = parser.parse_args()
+
+    if args.date:
+        target_dates = [args.date]
+    elif args.start and args.end:
+        s = datetime.strptime(args.start, "%Y-%m-%d")
+        e = datetime.strptime(args.end, "%Y-%m-%d")
+        target_dates = [(s + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((e - s).days + 1)]
+    else:
+        target_dates = [TODAY]
+
+    is_today = len(target_dates) == 1 and target_dates[0] == TODAY
+
     CONFIG.data_dir.mkdir(parents=True, exist_ok=True)
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("===== A股日级数据采集开始 =====")
 
     stock_list = get_stock_list()
-
-    quotes = fetch_all_quotes(stock_list)
-    if quotes.empty:
-        return
-
     board_map = build_board_mapping(stock_list)
-    quotes["board_code"] = quotes["code"].map(
-        lambda c: board_map.get(c, {}).get("board_code", "")
-    )
-    quotes["board_name"] = quotes["code"].map(
-        lambda c: board_map.get(c, {}).get("board_name", "")
-    )
 
-    logger.info("计算MACD (同花顺K线, 多线程)...")
-    codes = quotes["code"].tolist()
-    macd_results = {}
-    done = 0
+    codes = stock_list["code"].tolist()
     total = len(codes)
+    name_map = stock_list.set_index("code")["name"].to_dict()
 
-    batch_size = 500
+    # Fetch all candles once per stock
+    logger.info("获取同花顺K线数据...")
+    candles_cache = {}
+    batch_size = 200
     for batch_start in range(0, total, batch_size):
         batch = codes[batch_start:batch_start + batch_size]
         v_code = _get_ths_v()
+        results = {}
         with ThreadPoolExecutor(max_workers=20) as pool:
-            futures = {pool.submit(fetch_history_macd, c, v_code): c for c in batch}
+            futures = {pool.submit(fetch_stock_candles, c, v_code): c for c in batch}
             for f in as_completed(futures):
                 c = futures[f]
-                macd_results[c] = f.result()
-                done += 1
-        logger.info(f"  MACD: {done}/{total}")
+                results[c] = f.result()
+        for c, df in results.items():
+            if df is not None:
+                candles_cache[c] = df
+        logger.info(f"  K线: {min(batch_start+batch_size, total)}/{total}")
+    logger.info(f"K线获取完成: {len(candles_cache)}/{total} 只")
 
-    quotes["macd"] = quotes["code"].map(lambda c: macd_results.get(c, {}).get("macd"))
-    quotes["macd_signal"] = quotes["code"].map(lambda c: macd_results.get(c, {}).get("signal"))
-    quotes["macd_hist"] = quotes["code"].map(lambda c: macd_results.get(c, {}).get("hist"))
+    # Build rows for each target date
+    all_rows = []
+    for target_date in target_dates:
+        target_year = str(pd.Timestamp(target_date).year)
+        logger.info(f"处理日期 {target_date}...")
 
+        if is_today:
+            quotes_df = fetch_all_quotes(stock_list)
+            if quotes_df.empty:
+                return
+            for _, q in quotes_df.iterrows():
+                c = q["code"]
+                candle = candles_cache.get(c)
+                day_data = compute_day_data(candle, target_date) if candle is not None else {}
+                all_rows.append({
+                    "date": target_date,
+                    "code": c,
+                    "name": name_map.get(c, ""),
+                    "board_code": board_map.get(c, {}).get("board_code", ""),
+                    "board_name": board_map.get(c, {}).get("board_name", ""),
+                    "prev_close": q["prev_close"],
+                    "open": q["open"],
+                    "pct_chg": q["pct_chg"],
+                    "volume": q["volume"],
+                    "amount": q["amount"],
+                    "macd": day_data.get("macd"),
+                    "macd_signal": day_data.get("signal"),
+                    "macd_hist": day_data.get("hist"),
+                })
+        else:
+            for c in codes:
+                candle = candles_cache.get(c)
+                if candle is None:
+                    continue
+                day_data = compute_day_data(candle, target_date)
+                all_rows.append({
+                    "date": target_date,
+                    "code": c,
+                    "name": name_map.get(c, ""),
+                    "board_code": board_map.get(c, {}).get("board_code", ""),
+                    "board_name": board_map.get(c, {}).get("board_name", ""),
+                    **day_data,
+                })
+
+    if not all_rows:
+        logger.error("无数据可输出")
+        return
+
+    result = pd.DataFrame(all_rows)
     output_cols = [
-        "code", "name", "board_code", "board_name",
+        "date", "code", "name", "board_code", "board_name",
         "prev_close", "open", "pct_chg",
         "volume", "amount",
         "macd", "macd_signal", "macd_hist",
     ]
-    result = quotes[[c for c in output_cols if c in quotes.columns]]
-    result = result.sort_values("code").reset_index(drop=True)
+    result = result[[c for c in output_cols if c in result.columns]]
+    result = result.sort_values(["date", "code"]).reset_index(drop=True)
 
-    file_path = CONFIG.data_dir / f"stock_daily_{TODAY}.csv"
+    if is_today:
+        file_path = CONFIG.data_dir / f"stock_daily_{TODAY_FILE}.csv"
+    else:
+        file_path = CONFIG.data_dir / f"stock_daily_{target_dates[0]}_{target_dates[-1]}.csv"
     result.to_csv(file_path, index=False, encoding="utf-8-sig")
     logger.info(f"已保存: {file_path} ({len(result)} 条)")
 
-    print(f"\n成功: {len(result)} 只股票")
+    print(f"\n成功: {len(result)} 条记录, {result['date'].nunique()} 个交易日")
     print(f"输出: {file_path}")
     print(result.head(10).to_string())
 
