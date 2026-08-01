@@ -191,6 +191,11 @@ def run(start_date: str = "", end_date: str = "", max_boards: int = 0):
         return df
 
     save_sector_data(df)
+    try:
+        from db_handler import save_sector_daily_to_db
+        save_sector_daily_to_db(df)
+    except Exception as e:
+        logger.error(f"MySQL 写入失败: {e}")
     logger.info(f"完成: {len(df)} 条记录, "
                 f"{df[COL_BOARD_CODE].nunique()} 个板块, "
                 f"日期 {df[COL_DATE].min()} ~ {df[COL_DATE].max()}")
@@ -198,4 +203,4 @@ def run(start_date: str = "", end_date: str = "", max_boards: int = 0):
 
 
 if __name__ == "__main__":
-    run(start_date='20260601',end_date='20260729',max_boards=2)
+    run(start_date='20260101',end_date='20260731')

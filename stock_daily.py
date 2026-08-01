@@ -354,6 +354,12 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
     result = result[[c for c in output_cols if c in result.columns]]
     result = result.sort_values(["date", "code"]).reset_index(drop=True)
 
+    try:
+        from db_handler import save_stock_daily_to_db
+        save_stock_daily_to_db(result)
+    except Exception as e:
+        logger.error(f"MySQL 写入失败: {e}")
+
     if is_today:
         file_path = CONFIG.data_dir / f"stock_daily_{TODAY_FILE}.csv"
     else:
@@ -378,4 +384,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run(start_date='2026-01-01',end_date='2026-07-31')

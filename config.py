@@ -36,6 +36,11 @@ class Config:
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
 
+    mail_smtp_host: str = "smtp.qq.com"
+    mail_smtp_port: int = 465
+    mail_sender: str = os.environ.get("MAIL_SENDER", "")
+    mail_auth_code: str = os.environ.get("MAIL_AUTH_CODE", "")
+
     @property
     def stock_list_path(self) -> Path:
         return self.data_dir / "stock_list.csv"
