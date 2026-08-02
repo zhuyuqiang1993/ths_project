@@ -213,25 +213,7 @@ def build_etf_daily(
     return result
 
 
-def save_etf_data(df: pd.DataFrame):
-    file_path = CONFIG.data_dir / "etf_daily.csv"
-    out = df.rename(columns=_CN_NAMES)
-    if file_path.exists():
-        existing = pd.read_csv(file_path, encoding=CONFIG.csv_encoding)
-        existing.rename(columns=_REVERSE_CN, inplace=True)
-        combined = pd.concat([existing, df], ignore_index=True)
-        combined.drop_duplicates(subset=[COL_CODE, COL_DATE], keep="last", inplace=True)
-        combined.sort_values([COL_CODE, COL_DATE], inplace=True)
-        combined.rename(columns=_CN_NAMES).to_csv(
-            file_path, index=False, encoding=CONFIG.csv_encoding
-        )
-    else:
-        out.to_csv(file_path, index=False, encoding=CONFIG.csv_encoding)
-    logger.info(f"已保存到 {file_path} ({len(df)} 条)")
-
-
 def run(start_date: str = "", end_date: str = "", max_etfs: int = 0):
-    CONFIG.data_dir.mkdir(parents=True, exist_ok=True)
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
 
     etf_list = get_etf_list()
@@ -242,7 +224,15 @@ def run(start_date: str = "", end_date: str = "", max_etfs: int = 0):
         logger.warning("未获取到任何数据")
         return df
 
-    save_etf_data(df)
+    # 仅保留交易日, 跳过周末与中国法定节假日
+    from trade_calendar import is_trade_date
+    n_before = len(df)
+    df = df[df[COL_DATE].map(is_trade_date)].reset_index(drop=True)
+    if df.empty:
+        logger.warning("过滤后无交易日数据")
+        return df
+    logger.info(f"交易日过滤: {n_before} -> {len(df)} 条")
+
     try:
         from db_handler import save_etf_daily_to_db
         save_etf_daily_to_db(df)

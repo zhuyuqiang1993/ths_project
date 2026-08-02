@@ -44,18 +44,6 @@ logger.add(
     level="DEBUG",
 )
 
-_SESSION = requests.Session()
-_SESSION.verify = False
-_SESSION.trust_env = True
-
-CN_INDEX_TENCENT = [
-    ("上证指数", "sh000001"),
-    ("深证成指", "sz399001"),
-    ("创业板指", "sz399006"),
-    ("科创50", "sh000688"),
-    ("沪深300", "sh000300"),
-]
-
 KEY_SECTORS = [
     "半导体", "金融", "医药生物", "新能源", "消费",
     "有色金属", "房地产", "计算机", "机械设备", "电力",
@@ -64,22 +52,13 @@ KEY_SECTORS = [
 
 
 def fetch_indices() -> dict:
-    codes = ",".join(c for _, c in CN_INDEX_TENCENT)
+    """获取主要指数当日行情 (同花顺 v6 today.js 实时接口)。"""
     try:
-        r = _SESSION.get(f"https://qt.gtimg.cn/q={codes}", timeout=10)
-        result = {}
-        for line in r.text.strip().split(";"):
-            parts = line.split("~")
-            if len(parts) < 35:
-                continue
-            name = parts[1]
-            price = float(parts[3]) if parts[3] else 0
-            pct = float(parts[32]) if parts[32] else 0
-            chg = float(parts[31]) if parts[31] else 0
-            result[name] = {"price": price, "pct_chg": pct, "change": chg}
+        from ths_client import fetch_index_spot
+        result = fetch_index_spot()
         return result
     except Exception as e:
-        logger.warning(f"腾讯行情获取失败: {e}")
+        logger.warning(f"同花顺指数行情获取失败: {e}")
         return {}
 
 

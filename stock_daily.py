@@ -51,7 +51,6 @@ _SESSION.verify = False
 _SESSION.trust_env = True
 
 TODAY = datetime.now().strftime("%Y-%m-%d")
-TODAY_FILE = datetime.now().strftime("%Y%m%d")
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -75,61 +74,61 @@ def calc_macd(df: pd.DataFrame, close_col: str = "close") -> dict:
 
 
 def get_stock_list() -> pd.DataFrame:
-    logger.info("获取A股代码列表 (akshare)...")
-    df = ak.stock_info_a_code_name()
-    df.columns = ["code", "name"]
+    logger.info("获取A股代码列表 (同花顺)...")
+    from ths_client import get_stock_list as ths_stock_list
+    df = ths_stock_list()
     df["code"] = df["code"].astype(str).str.zfill(6)
-    # 过滤掉北交所 (8xxxxx, 4xxxxx)
-    df = df[df["code"].str.match(r"^(0|3|6)\d{5}$")]
     logger.info(f"共 {len(df)} 只股票")
     return df
 
 
-def fetch_quotes_batch(codes: list) -> list:
-    query = ",".join(
-        f"sh{c}" if c.startswith(("6", "9")) else f"sz{c}" for c in codes
-    )
-    rows = []
-    try:
-        r = _SESSION.get(f"https://qt.gtimg.cn/q={query}", timeout=15)
-        for line in r.text.strip().split(";"):
-            parts = line.split("~")
-            if len(parts) < 35 or not parts[2]:
-                continue
-            rows.append({
-                "code": parts[2],
-                "prev_close": float(parts[4]) if parts[4] else 0,
-                "open": float(parts[5]) if parts[5] else 0,
-                "high": float(parts[33]) if parts[33] else 0,
-                "low": float(parts[34]) if parts[34] else 0,
-                "price": float(parts[3]) if parts[3] else 0,
-                "volume": int(float(parts[6])) if parts[6] else 0,
-                "amount": float(parts[7]) if parts[7] else 0,
-                "pct_chg": float(parts[32]) if parts[32] else 0,
-                "change": float(parts[31]) if parts[31] else 0,
-            })
-    except Exception:
-        pass
-    return rows
-
-
 def fetch_all_quotes(stock_list: pd.DataFrame) -> pd.DataFrame:
-    logger.info("获取A股实时行情 (腾讯)...")
-    codes = stock_list["code"].tolist()
-    all_rows = []
-    batch_size = 80
-    total = len(codes)
-    for i in range(0, total, batch_size):
-        batch = codes[i:i + batch_size]
-        all_rows.extend(fetch_quotes_batch(batch))
-        if (i // batch_size + 1) % 10 == 0:
-            logger.info(f"  行情进度: {min(i+batch_size, total)}/{total}")
-        time.sleep(0.15)
-
-    df = pd.DataFrame(all_rows)
+    """获取A股实时行情 (同花顺). 返回 code/name/price/prev_close/open/high/
+    low/pct_chg/change/volume/amount; 缺失字段用当日K线补齐。"""
+    logger.info("获取A股实时行情 (同花顺)...")
+    from ths_client import fetch_ths_stock_spot
+    df = fetch_ths_stock_spot()
     if df.empty:
         logger.error("未获取到行情数据")
         return pd.DataFrame()
+
+    candles_cache = getattr(fetch_all_quotes, "candles_cache", {})
+    today = TODAY
+    rows = []
+    for _, q in df.iterrows():
+        c = q["code"]
+        price = float(q["latest_price"]) if pd.notna(q["latest_price"]) else 0
+        pct = float(q["pct_chg"]) if pd.notna(q["pct_chg"]) else 0
+        prev_close = round(price / (1 + pct / 100), 2) if pct != -100 and price else 0
+        change = round(price - prev_close, 2) if price else 0
+
+        candle = candles_cache.get(c)
+        open_, high, low, volume = 0, price, price, 0
+        if candle is not None and not candle.empty:
+            td = pd.Timestamp(today)
+            today_row = candle[candle["date"] == td]
+            if not today_row.empty:
+                r = today_row.iloc[-1]
+                open_ = float(r["open"]) if pd.notna(r["open"]) else open_
+                high = float(r["high"]) if pd.notna(r["high"]) else high
+                low = float(r["low"]) if pd.notna(r["low"]) else low
+                volume = int(float(r["volume"])) if pd.notna(r["volume"]) else volume
+
+        rows.append({
+            "code": c,
+            "name": q["name"],
+            "price": price,
+            "prev_close": prev_close,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "pct_chg": pct,
+            "change": change,
+            "volume": volume,
+            "amount": float(q["amount"]) if pd.notna(q["amount"]) else 0,
+        })
+
+    df = pd.DataFrame(rows)
     df = df.drop_duplicates(subset="code").reset_index(drop=True)
     logger.info(f"有效行情: {len(df)} 只")
     return df
@@ -260,13 +259,19 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
     if start_date and end_date and start_date != end_date:
         s = datetime.strptime(start_date, "%Y-%m-%d")
         e = datetime.strptime(end_date, "%Y-%m-%d")
-        target_dates = [(s + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((e - s).days + 1)]
+        raw_dates = [(s + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((e - s).days + 1)]
     else:
-        target_dates = [start_date or end_date or TODAY]
+        raw_dates = [start_date or end_date or TODAY]
+
+    # 跳过周末与中国法定节假日, 仅处理交易日
+    from trade_calendar import get_trade_dates
+    target_dates = get_trade_dates(raw_dates[0], raw_dates[-1])
+    if not target_dates:
+        logger.warning("所选日期区间内无交易日, 跳过更新")
+        return pd.DataFrame()
 
     is_today = len(target_dates) == 1 and target_dates[0] == TODAY
 
-    CONFIG.data_dir.mkdir(parents=True, exist_ok=True)
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("===== A股日级数据采集开始 =====")
@@ -303,6 +308,7 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
         logger.info(f"处理日期 {target_date}...")
 
         if is_today:
+            fetch_all_quotes.candles_cache = candles_cache
             quotes_df = fetch_all_quotes(stock_list)
             if quotes_df.empty:
                 return pd.DataFrame()
@@ -360,15 +366,7 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"MySQL 写入失败: {e}")
 
-    if is_today:
-        file_path = CONFIG.data_dir / f"stock_daily_{TODAY_FILE}.csv"
-    else:
-        file_path = CONFIG.data_dir / f"stock_daily_{target_dates[0]}_{target_dates[-1]}.csv"
-    result.to_csv(file_path, index=False, encoding="utf-8-sig")
-    logger.info(f"已保存: {file_path} ({len(result)} 条)")
-
     print(f"\n成功: {len(result)} 条记录, {result['date'].nunique()} 个交易日")
-    print(f"输出: {file_path}")
     print(result.head(10).to_string())
     logger.info("===== A股日级数据采集结束 =====")
 

@@ -5,7 +5,7 @@ from datetime import datetime
 from loguru import logger
 
 from config import CONFIG
-from stock_fetcher import get_stock_list, fetch_stock_daily, save_stock_data
+from stock_fetcher import get_stock_list, fetch_stock_daily
 from db_handler import save_stock_list_to_db, save_stock_daily_to_db
 
 logger.remove()
@@ -23,7 +23,6 @@ logger.add(
 
 
 def run():
-    CONFIG.data_dir.mkdir(parents=True, exist_ok=True)
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("获取全部A股股票列表...")
@@ -41,8 +40,7 @@ def run():
             logger.info(f"[{i}/{total}] 正在获取 {code}...")
             df = fetch_stock_daily(code)
             if df is not None and not df.empty:
-                save_stock_data(df, code)
-                save_stock_daily_to_db(df, code)
+                save_stock_daily_to_db(df)
                 success += 1
                 logger.info(f"  -> {code} 保存成功 ({len(df)} 条)")
             else:

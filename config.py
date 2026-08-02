@@ -6,8 +6,8 @@ from typing import List
 
 @dataclass
 class Config:
-    stock_list_api: str = "stock_zh_a_spot_em"
-    stock_daily_api: str = "stock_zh_a_hist"
+    stock_list_api: str = "ths_stock_spot"
+    stock_daily_api: str = "ths_kline"
 
     start_date: str = "20100101"
     end_date: str = ""
@@ -20,7 +20,7 @@ class Config:
     retry_delay: float = 2.0
     request_interval: float = 0.5
 
-    daily_run_time: str = "18:00"
+    daily_run_time: str = "21:35"
 
     csv_encoding: str = "utf-8-sig"
 
@@ -40,10 +40,6 @@ class Config:
     mail_smtp_port: int = 465
     mail_sender: str = os.environ.get("MAIL_SENDER", "")
     mail_auth_code: str = os.environ.get("MAIL_AUTH_CODE", "")
-
-    @property
-    def stock_list_path(self) -> Path:
-        return self.data_dir / "stock_list.csv"
 
 
 CONFIG = Config()

@@ -17,6 +17,34 @@ def get_connection():
     )
 
 
+DDL_STOCK_LIST = """
+CREATE TABLE IF NOT EXISTS stock_list (
+    code varchar(10) NOT NULL,
+    name varchar(32) NOT NULL DEFAULT '',
+    latest_price decimal(12,2) DEFAULT NULL,
+    pct_chg decimal(6,2) DEFAULT NULL,
+    price_change decimal(12,2) DEFAULT NULL,
+    volume bigint DEFAULT NULL,
+    amount decimal(16,2) DEFAULT NULL,
+    amplitude decimal(6,2) DEFAULT NULL,
+    high decimal(12,2) DEFAULT NULL,
+    low decimal(12,2) DEFAULT NULL,
+    open decimal(12,2) DEFAULT NULL,
+    prev_close decimal(12,2) DEFAULT NULL,
+    volume_ratio decimal(6,2) DEFAULT NULL,
+    turnover_rate decimal(10,4) DEFAULT NULL,
+    pe_dynamic decimal(12,2) DEFAULT NULL,
+    pb decimal(12,2) DEFAULT NULL,
+    total_mv decimal(20,2) DEFAULT NULL,
+    float_mv decimal(20,2) DEFAULT NULL,
+    pct_chg_60d decimal(6,2) DEFAULT NULL,
+    created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+
 DDL_STOCK_DAILY = """
 CREATE TABLE IF NOT EXISTS stock_daily (
     code varchar(10) NOT NULL,
@@ -99,7 +127,7 @@ DEFAULT_EMAIL_SUBSCRIPTION = (
     "zhuyuqiang2015@outlook.com",
     "2026-01-01",
     9999999,
-    "market_sentiment,stock_screen,etf_screen",
+    "market_sentiment,sector_screen,stock_screen,etf_screen",
 )
 
 
@@ -149,6 +177,62 @@ CREATE TABLE IF NOT EXISTS candidate_stock (
 """
 
 
+DDL_CANDIDATE_ETF = """
+CREATE TABLE IF NOT EXISTS candidate_etf (
+    code varchar(10) NOT NULL,
+    name varchar(32) DEFAULT '',
+    date date NOT NULL COMMENT '交易日(近5日窗口最后一天)',
+    identified_at date NOT NULL COMMENT '识别为候选ETF的日期',
+    close decimal(12,2) DEFAULT NULL,
+    prev_close decimal(12,2) DEFAULT NULL,
+    pct_chg decimal(8,4) DEFAULT NULL,
+    volume bigint DEFAULT NULL,
+    amount decimal(20,2) DEFAULT NULL,
+    chg_5d decimal(8,4) DEFAULT NULL COMMENT '近5日累计涨幅%',
+    created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (code, identified_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+
+TABLE_DDL = {
+    "stock_list": DDL_STOCK_LIST,
+    "stock_daily": DDL_STOCK_DAILY,
+    "sector_daily": DDL_SECTOR_DAILY,
+    "etf_daily": DDL_ETF_DAILY,
+    "email_subscription": DDL_EMAIL_SUBSCRIPTION,
+    "candidate_sector": DDL_CANDIDATE_SECTOR,
+    "candidate_stock": DDL_CANDIDATE_STOCK,
+    "candidate_etf": DDL_CANDIDATE_ETF,
+}
+
+
+def ensure_table(table: str):
+    """若表不存在则按 DDL 自动创建, 确保写入前表结构就绪。"""
+    ddl = TABLE_DDL.get(table)
+    if not ddl:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """SELECT COUNT(*) FROM information_schema.TABLES
+               WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s""",
+            (CONFIG.mysql_database, table),
+        )
+        if cursor.fetchone()[0] == 0:
+            cursor.execute(ddl)
+            conn.commit()
+            logger.info(f"表 {table} 不存在, 已自动创建")
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def create_tables():
     """创建/重建表结构。若旧 stock_daily 表存在（id 主键），先删除再按新结构重建。"""
     conn = get_connection()
@@ -167,12 +251,14 @@ def create_tables():
             if pk_col != "code":
                 cursor.execute("DROP TABLE stock_daily")
                 logger.info("旧版 stock_daily (id 主键) 已删除，重建新结构")
+        cursor.execute(DDL_STOCK_LIST)
         cursor.execute(DDL_STOCK_DAILY)
         cursor.execute(DDL_SECTOR_DAILY)
         cursor.execute(DDL_ETF_DAILY)
         cursor.execute(DDL_EMAIL_SUBSCRIPTION)
         cursor.execute(DDL_CANDIDATE_SECTOR)
         cursor.execute(DDL_CANDIDATE_STOCK)
+        cursor.execute(DDL_CANDIDATE_ETF)
         # 兼容旧表: 若缺 tag 列则补列, 并升级主键 (code, identified_at) -> (code, identified_at, tag)
         cursor.execute(
             """SELECT COUNT(*) FROM information_schema.COLUMNS
@@ -188,7 +274,7 @@ def create_tables():
             cursor.execute("ALTER TABLE candidate_stock DROP PRIMARY KEY, ADD PRIMARY KEY (code, identified_at, tag)")
             logger.info(f"candidate_stock 主键已升级: {pk_cols} -> code+identified_at+tag")
         conn.commit()
-        logger.info("表结构创建完成: stock_daily / sector_daily / etf_daily / email_subscription / candidate_sector / candidate_stock")
+        logger.info("表结构创建完成: stock_list / stock_daily / sector_daily / etf_daily / email_subscription / candidate_sector / candidate_stock")
     except Exception as e:
         conn.rollback()
         raise e
@@ -206,7 +292,9 @@ def init_email_subscription():
         cursor.execute(
             """INSERT INTO email_subscription (email, start_date, duration, features)
                VALUES (%s, %s, %s, %s)
-               ON DUPLICATE KEY UPDATE email=VALUES(email)""",
+               ON DUPLICATE KEY UPDATE
+               start_date=VALUES(start_date), duration=VALUES(duration),
+               features=VALUES(features)""",
             DEFAULT_EMAIL_SUBSCRIPTION,
         )
         conn.commit()
@@ -220,6 +308,7 @@ def init_email_subscription():
 
 
 def save_stock_list_to_db(df: pd.DataFrame):
+    ensure_table("stock_list")
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -384,9 +473,42 @@ def save_candidate_stock_to_db(df: pd.DataFrame, replace_date: bool = False):
     _write_df(df, sql, cols, "candidate_stock")
 
 
+def delete_candidate_etf_by_date(identified_at):
+    """删除指定识别日期的候选ETF, 保证同一天重复筛选幂等"""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM candidate_etf WHERE identified_at = %s", (identified_at,))
+        conn.commit()
+        logger.info(f"已删除 candidate_etf identified_at={identified_at} 记录 {cur.rowcount} 条")
+        cur.close()
+    finally:
+        conn.close()
+
+
+def save_candidate_etf_to_db(df: pd.DataFrame, replace_date: bool = False):
+    """写入候选ETF (code/name/date/identified_at/close/prev_close/
+    pct_chg/volume/amount/chg_5d); replace_date=True 时先删同日旧记录"""
+    if replace_date:
+        delete_candidate_etf_by_date(df["identified_at"].iloc[0])
+    cols = ["code", "name", "date", "identified_at",
+            "close", "prev_close", "pct_chg", "volume", "amount", "chg_5d"]
+    sql = """INSERT INTO candidate_etf
+             (code, name, date, identified_at,
+              close, prev_close, pct_chg, volume, amount, chg_5d)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             ON DUPLICATE KEY UPDATE
+             name=VALUES(name), date=VALUES(date),
+             close=VALUES(close), prev_close=VALUES(prev_close),
+             pct_chg=VALUES(pct_chg), volume=VALUES(volume),
+             amount=VALUES(amount), chg_5d=VALUES(chg_5d)"""
+    _write_df(df, sql, cols, "candidate_etf")
+
+
 def _write_df(df: pd.DataFrame, sql: str, cols: list, table: str):
     if df is None or df.empty:
         return
+    ensure_table(table)
     conn = get_connection()
     cursor = conn.cursor()
     try:
