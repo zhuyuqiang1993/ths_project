@@ -29,6 +29,7 @@ logger.add(
 
 SCREEN_WINDOW = 5
 PASS_DAYS = 3
+UP_AMPLITUDE_THRESHOLD = 5.0
 
 
 def _query(sql: str, params: tuple = ()) -> pd.DataFrame:
@@ -81,21 +82,25 @@ def get_board_stocks(board_code: str, dates: list) -> pd.DataFrame:
     )
 
 
-def _count_vol_price_days(closes: list, vols: list) -> int:
-    """近5日上涨放量、下跌缩量的天数统计:
-    - 当日上涨 (close[i] > close[i-1]): 成交量 >= 前一日 (放量) 计1
-    - 当日下跌 (close[i] < close[i-1]): 成交量 <= 前一日 (缩量) 计1
-    - volume 缺失的一日跳过 (不计)
+def _pass_vol_price(closes: list, vols: list) -> bool:
+    """量价配合筛选 (5日窗口):
+    - 上涨日 (close[i] > close[i-1]):
+        放量 (volume[i] >= volume[i-1]) 通过;
+        缩量上涨 (volume[i] < volume[i-1]) 允许, 但当日涨幅必须 > 5% (例外不限天数)
+    - 下跌日 (close[i] < close[i-1]): 必须缩量 (volume[i] <= volume[i-1]),
+      判定周期内所有下跌日均需满足
+    - 平盘日不参与判断; 缺量的日子跳过
     """
-    ok = 0
     for i in range(1, len(closes)):
         if vols[i] is None or vols[i - 1] is None or pd.isna(vols[i]) or pd.isna(vols[i - 1]):
             continue
-        if closes[i] > closes[i - 1] and vols[i] >= vols[i - 1]:
-            ok += 1
-        if closes[i] < closes[i - 1] and vols[i] <= vols[i - 1]:
-            ok += 1
-    return ok
+        if closes[i] > closes[i - 1]:
+            if vols[i] < vols[i - 1] and (closes[i] / closes[i - 1] - 1) * 100 <= UP_AMPLITUDE_THRESHOLD:
+                return False
+        elif closes[i] < closes[i - 1]:
+            if vols[i] > vols[i - 1]:
+                return False
+    return True
 
 
 def _count_relative_strength_days(stock_pcts: list, sector_pcts: list) -> int:
@@ -122,7 +127,7 @@ def _screen_one_board(board_code: str, board_name: str, dates: list,
                       with_macd: bool, check_vol: bool) -> list:
     """筛选单个板块下满足条件的个股。
     - with_macd: 是否要求 MACD>0 (strict/strong 要求, vol_price 不要求)
-    - check_vol: 是否要求近5日上涨放量、下跌缩量 (strict/vol_price 要求, strong 不要求)
+    - check_vol: 是否要求量价配合 (strict/vol_price 要求, strong 不要求)
     返回候选 dict 列表 (含 tag)
     """
     stocks = get_board_stocks(board_code, dates)
@@ -156,14 +161,14 @@ def _screen_one_board(board_code: str, board_name: str, dates: list,
             # strict: 最近交易日强于板块 + 多数日强于板块(>=3/5) + 量价(>=3/5) + MACD>0
             # strong: 多数日强于板块(>=3/5) + MACD>0
             if stock_pcts[-1] > sector_pcts[-1] and ok_days >= PASS_DAYS \
-                    and (not check_vol or _count_vol_price_days(closes, vols) >= PASS_DAYS):
+                    and (not check_vol or _pass_vol_price(closes, vols)):
                 tags.add("strict")
             if ok_days >= PASS_DAYS:
                 tags.add("strong")
         else:
             # vol_price: 最近交易日强于板块 + 多数日强于板块(>=3/5) + 量价(>=3/5), 不要求MACD
             if stock_pcts[-1] > sector_pcts[-1] and ok_days >= PASS_DAYS \
-                    and (not check_vol or _count_vol_price_days(closes, vols) >= PASS_DAYS):
+                    and (not check_vol or _pass_vol_price(closes, vols)):
                 tags.add("vol_price")
 
         if not tags:
