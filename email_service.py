@@ -160,7 +160,7 @@ def build_candidate_stock() -> str:
         return _section(FEATURE_STOCK, "无数据")
 
     df = _query(
-        """SELECT code, name, board_name, tag, pct_chg, macd, chg_5d, avg_rel
+        """SELECT code, name, board_name, tag, open, close, pct_chg, macd, chg_5d, avg_rel
            FROM candidate_stock WHERE identified_at = %s
            ORDER BY FIELD(tag,'strict','strong','vol_price'), avg_rel DESC""",
         (latest,),
@@ -176,6 +176,8 @@ def build_candidate_stock() -> str:
         rows = "".join(
             f"<tr><td>{_n(r['code'])}</td><td>{_n(r['name'])}</td>"
             f"<td>{_n(r['board_name']) or ''}</td>"
+            f"<td>{_n(r['open']) or ''}</td>"
+            f"<td>{_n(r['close']) or ''}</td>"
             f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
             f"<td>{_n(r['chg_5d']) or ''}%</td>"
             f"<td>{_n(r['macd']) or ''}</td></tr>"
@@ -185,7 +187,7 @@ def build_candidate_stock() -> str:
         <p><b>{TAG_NAMES[tag]} ({len(sub)})</b></p>
         <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse">
           <tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>板块</td>
-              <td>当日涨幅</td><td>5日涨幅</td><td>MACD</td></tr>
+              <td>开盘</td><td>收盘</td><td>当日涨幅</td><td>5日涨幅</td><td>MACD</td></tr>
           {rows}
         </table>
         """)

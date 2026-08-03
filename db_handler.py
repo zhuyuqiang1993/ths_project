@@ -167,6 +167,7 @@ CREATE TABLE IF NOT EXISTS candidate_stock (
     board_name varchar(32) DEFAULT '',
     date date NOT NULL COMMENT '交易日(近5日窗口最后一天)',
     identified_at date NOT NULL COMMENT '识别为候选股票的日期',
+    open decimal(12,2) DEFAULT NULL COMMENT '开盘价',
     close decimal(12,2) DEFAULT NULL,
     pct_chg decimal(6,2) DEFAULT NULL,
     macd decimal(10,4) DEFAULT NULL,
@@ -289,6 +290,15 @@ def create_tables():
         if pk_cols != ["code", "identified_at", "tag"]:
             cursor.execute("ALTER TABLE candidate_stock DROP PRIMARY KEY, ADD PRIMARY KEY (code, identified_at, tag)")
             logger.info(f"candidate_stock 主键已升级: {pk_cols} -> code+identified_at+tag")
+        # 兼容旧表: 若缺 open 列则补列
+        cursor.execute(
+            """SELECT COUNT(*) FROM information_schema.COLUMNS
+               WHERE TABLE_SCHEMA=%s AND TABLE_NAME='candidate_stock' AND COLUMN_NAME='open'""",
+            (CONFIG.mysql_database,),
+        )
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("ALTER TABLE candidate_stock ADD COLUMN open decimal(12,2) DEFAULT NULL COMMENT '开盘价' AFTER identified_at")
+            logger.info("candidate_stock 表已补 open 列")
         conn.commit()
         logger.info("表结构创建完成: stock_list / stock_daily / sector_daily / etf_daily / email_subscription / candidate_sector / candidate_stock")
     except Exception as e:
@@ -472,19 +482,19 @@ def delete_candidate_stock_by_date(identified_at):
 
 def save_candidate_stock_to_db(df: pd.DataFrame, replace_date: bool = False):
     """写入候选股票 (code/name/board_code/board_name/date/identified_at/
-    close/pct_chg/macd/chg_5d/avg_rel/tag); replace_date=True 时先删同日旧记录"""
+    open/close/pct_chg/macd/chg_5d/avg_rel/tag); replace_date=True 时先删同日旧记录"""
     if replace_date:
         delete_candidate_stock_by_date(df["identified_at"].iloc[0])
     cols = ["code", "name", "board_code", "board_name", "date", "identified_at",
-            "close", "pct_chg", "macd", "chg_5d", "avg_rel", "tag"]
+            "open", "close", "pct_chg", "macd", "chg_5d", "avg_rel", "tag"]
     sql = """INSERT INTO candidate_stock
              (code, name, board_code, board_name, date, identified_at,
-              close, pct_chg, macd, chg_5d, avg_rel, tag)
-             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              open, close, pct_chg, macd, chg_5d, avg_rel, tag)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
              ON DUPLICATE KEY UPDATE
              name=VALUES(name), board_code=VALUES(board_code),
              board_name=VALUES(board_name), date=VALUES(date),
-             close=VALUES(close), pct_chg=VALUES(pct_chg),
+             open=VALUES(open), close=VALUES(close), pct_chg=VALUES(pct_chg),
              macd=VALUES(macd), chg_5d=VALUES(chg_5d), avg_rel=VALUES(avg_rel),
              tag=VALUES(tag)"""
     _write_df(df, sql, cols, "candidate_stock")

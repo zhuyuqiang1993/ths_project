@@ -74,7 +74,7 @@ def get_sector_last_n_days(board_code: str, n: int = SCREEN_WINDOW) -> pd.DataFr
 def get_board_stocks(board_code: str, dates: list) -> pd.DataFrame:
     placeholders = ",".join(["%s"] * len(dates))
     return _query(
-        f"""SELECT code, name, date, pct_chg, prev_close, volume, macd
+        f"""SELECT code, name, date, open, pct_chg, prev_close, volume, macd
             FROM stock_daily
             WHERE board_code = %s AND date IN ({placeholders})
             ORDER BY code, date""",
@@ -185,6 +185,7 @@ def _screen_one_board(board_code: str, board_name: str, dates: list,
                 "board_name": board_name,
                 "date": dates[-1],
                 "identified_at": identified_at,
+                "open": last["open"],
                 "close": close,
                 "pct_chg": last["pct_chg"],
                 "macd": macd,
