@@ -125,7 +125,7 @@ def job():
     logger.info(f"最近交易日锚点: {anchor}")
     run_updates(anchor)
     run_screens()
-    send_daily_email()
+    #send_daily_email()
     logger.info(f"=== 每日定时任务结束 (耗时 {round(time.time() - t0, 1)}s) ===")
 
 

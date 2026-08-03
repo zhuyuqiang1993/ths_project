@@ -385,4 +385,4 @@ def main():
 
 
 if __name__ == "__main__":
-    run(start_date='2026-06 -01',end_date='2026-07-31')
+    run(start_date='2026-06-01',end_date='2026-07-31')
