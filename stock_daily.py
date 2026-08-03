@@ -324,6 +324,9 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
                     "board_name": board_map.get(c, {}).get("board_name", ""),
                     "prev_close": q["prev_close"],
                     "open": q["open"],
+                    "high": q["high"],
+                    "low": q["low"],
+                    "close": q["price"],
                     "pct_chg": q["pct_chg"],
                     "volume": q["volume"],
                     "amount": q["amount"],
@@ -353,7 +356,7 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
     result = pd.DataFrame(all_rows)
     output_cols = [
         "date", "code", "name", "board_code", "board_name",
-        "prev_close", "open", "pct_chg",
+        "prev_close", "open", "high", "low", "close", "pct_chg",
         "volume", "amount",
         "macd", "macd_signal", "macd_hist",
     ]
@@ -382,4 +385,4 @@ def main():
 
 
 if __name__ == "__main__":
-    run(start_date='2026-01-01',end_date='2026-07-31')
+    run(start_date='2026-06 -01',end_date='2026-07-31')

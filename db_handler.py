@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS stock_daily (
     board_name varchar(32) DEFAULT '',
     prev_close decimal(12,2) DEFAULT NULL,
     open decimal(12,2) DEFAULT NULL,
+    high decimal(12,2) DEFAULT NULL,
+    low decimal(12,2) DEFAULT NULL,
+    close decimal(12,2) DEFAULT NULL,
     pct_chg decimal(6,2) DEFAULT NULL,
     volume bigint DEFAULT NULL,
     amount decimal(16,2) DEFAULT NULL,
@@ -253,6 +256,19 @@ def create_tables():
                 logger.info("旧版 stock_daily (id 主键) 已删除，重建新结构")
         cursor.execute(DDL_STOCK_LIST)
         cursor.execute(DDL_STOCK_DAILY)
+        # 兼容旧表: 补 high/low/close 列 (旧 stock_daily 缺当日最高/最低/收盘)
+        cursor.execute(
+            """SELECT COLUMN_NAME FROM information_schema.COLUMNS
+               WHERE TABLE_SCHEMA=%s AND TABLE_NAME='stock_daily'""",
+            (CONFIG.mysql_database,),
+        )
+        existing_cols = {r[0] for r in cursor.fetchall()}
+        for col, ddl in (("high", "ADD COLUMN high decimal(12,2) DEFAULT NULL AFTER open"),
+                         ("low", "ADD COLUMN low decimal(12,2) DEFAULT NULL AFTER high"),
+                         ("close", "ADD COLUMN close decimal(12,2) DEFAULT NULL AFTER low")):
+            if col not in existing_cols:
+                cursor.execute("ALTER TABLE stock_daily " + ddl)
+                logger.info(f"stock_daily 表已补 {col} 列")
         cursor.execute(DDL_SECTOR_DAILY)
         cursor.execute(DDL_ETF_DAILY)
         cursor.execute(DDL_EMAIL_SUBSCRIPTION)
@@ -363,19 +379,20 @@ def save_stock_list_to_db(df: pd.DataFrame):
 
 def save_stock_daily_to_db(df: pd.DataFrame):
     """写入个股日线 (date/code/name/board_code/board_name/prev_close/open/
-    pct_chg/volume/amount/macd/macd_signal/macd_hist)"""
+    high/low/close/pct_chg/volume/amount/macd/macd_signal/macd_hist)"""
     cols = ["code", "date", "name", "board_code", "board_name",
-            "prev_close", "open", "pct_chg", "volume", "amount",
-            "macd", "macd_signal", "macd_hist"]
+            "prev_close", "open", "high", "low", "close", "pct_chg",
+            "volume", "amount", "macd", "macd_signal", "macd_hist"]
     sql = """INSERT INTO stock_daily
              (code, date, name, board_code, board_name,
-              prev_close, open, pct_chg, volume, amount,
-              macd, macd_signal, macd_hist)
-             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              prev_close, open, high, low, close, pct_chg,
+              volume, amount, macd, macd_signal, macd_hist)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
              ON DUPLICATE KEY UPDATE
              name=VALUES(name), board_code=VALUES(board_code),
              board_name=VALUES(board_name), prev_close=VALUES(prev_close),
-             open=VALUES(open), pct_chg=VALUES(pct_chg), volume=VALUES(volume),
+             open=VALUES(open), high=VALUES(high), low=VALUES(low),
+             close=VALUES(close), pct_chg=VALUES(pct_chg), volume=VALUES(volume),
              amount=VALUES(amount), macd=VALUES(macd),
              macd_signal=VALUES(macd_signal), macd_hist=VALUES(macd_hist)"""
     _write_df(df, sql, cols, "stock_daily")
