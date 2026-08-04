@@ -52,7 +52,7 @@ def db_latest_date(table: str) -> str | None:
 
 MARKET_CLOSE = (15, 30)
 SKIP_WINDOW_DAYS = 5     # 近5个交易日数据已存在则跳过更新
-ENSURE_WINDOW_DAYS = 10  # 需要刷新时, 保证近10个交易日数据存在
+ENSURE_WINDOW_DAYS = 60  # 需要刷新时, 保证近60个交易日数据存在 (新筛选需MA60)
 
 
 def _before_market_close() -> bool:
@@ -180,7 +180,7 @@ def job():
     logger.info(f"最近交易日锚点: {anchor}")
     run_updates(anchor)
     run_screens()
-    send_daily_email()
+    #send_daily_email()
     logger.info(f"=== 每日定时任务结束 (耗时 {round(time.time() - t0, 1)}s) ===")
 
 
