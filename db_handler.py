@@ -381,7 +381,7 @@ def init_email_subscription():
 
 def has_data_in_range(table: str, start_date: str, end_date: str,
                       date_col: str = "date") -> bool:
-    """检查指定表在日期范围内是否已有数据, 用于避免冗余API调用。
+    """检查指定表在日期范围内是否每天都有数据, 用于避免冗余API调用。
 
     Args:
         table: 表名 (stock_daily / sector_daily / etf_daily)
@@ -390,23 +390,32 @@ def has_data_in_range(table: str, start_date: str, end_date: str,
         date_col: 日期列名, 默认 "date"
 
     Returns:
-        True = 数据已存在, 可跳过拉取; False = 需要拉取
+        True = 区间内每天都有数据, 可跳过拉取; False = 有缺失, 需要拉取
     """
     s = start_date.replace("-", "")
     e = end_date.replace("-", "")
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        # 获取区间内的交易日数量
+        from trade_calendar import get_trade_dates
+        trade_dates = get_trade_dates(start_date, end_date)
+        if not trade_dates:
+            return True  # 无交易日, 无需拉取
+        expected = len(trade_dates)
+
         cursor.execute(
             f"""SELECT COUNT(DISTINCT `{date_col}`) FROM `{table}`
                 WHERE `{date_col}` BETWEEN %s AND %s""",
             (s, e),
         )
-        count = cursor.fetchone()[0]
-        if count > 0:
-            logger.info(f"[{table}] 已存在 {count} 个交易日数据 ({start_date} ~ {end_date}), 可跳过拉取")
+        actual = cursor.fetchone()[0]
+        if actual >= expected:
+            logger.info(f"[{table}] 区间内 {expected} 个交易日数据完整, 可跳过拉取")
             return True
-        return False
+        else:
+            logger.info(f"[{table}] 区间内缺失 {expected - actual}/{expected} 个交易日数据, 需要拉取")
+            return False
     except Exception as e:
         logger.warning(f"检查 {table} 日期范围数据失败: {e}")
         return False
