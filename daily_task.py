@@ -62,9 +62,10 @@ def _before_market_close() -> bool:
 
 
 def _fetch_today_if_missing():
-    """收盘后预检: 若当天是交易日且天级表中无当天数据, 先单独拉取当天数据。
+    """预检: 若当天是交易日且天级表中无当天数据, 先单独拉取当天数据。
 
     在 run_updates() 的主流程之前调用, 确保当天数据就位后再做完整性判断。
+    盘中会拉到盘中快照数据, 收盘后会拉到完整日线数据。
     """
     today_str = date.today().strftime("%Y-%m-%d")
     try:
@@ -74,11 +75,7 @@ def _fetch_today_if_missing():
     except Exception:
         return
 
-    # 已经是盘中(15:30前)则跳过, 由 run_updates 的 force_refresh 逻辑处理
-    if _before_market_close():
-        return
-
-    logger.info(f"[预检] 收盘后检测当天({today_str})数据是否就位...")
+    logger.info(f"[预检] 检测当天({today_str})数据是否就位...")
 
     steps = [
         ("个股", "stock_daily", "stock_daily", "YYYY-MM-DD"),
@@ -151,21 +148,33 @@ def _has_recent_days(table: str, dates: list) -> bool:
 def run_updates(anchor: str | None):
     """数据更新: 板块 -> 个股 -> ETF (增量, 避免全量重拉)。
 
-    - 收盘后预检: 若当天是交易日且数据缺失, 先单独拉取当天数据
-    - 交易日 15:30 之前: 需要拉取当日(盘中)数据, 强制刷新近10个交易日窗口
-    - 其余时间: 若近5个交易日数据已存在则跳过; 否则只增量拉取近10个交易日窗口
+    - 预检: 若当天是交易日且数据缺失, 先单独拉取当天数据
+    - 交易日 15:30 之前: 锚点为上一个已完成交易日, 强制刷新近5个交易日窗口
+    - 收盘后: 锚点为当天, 若近5个交易日数据已存在则跳过; 否则增量拉取近60个交易日窗口
     """
-    # 收盘后预检: 先确保当天数据就位
+    # 预检: 先确保当天数据就位 (盘中拉盘中快照, 收盘后拉完整日线)
     _fetch_today_if_missing()
 
     today_str = date.today().strftime("%Y-%m-%d")
     try:
-        from trade_calendar import is_trade_date
-        force_refresh = is_trade_date(today_str) and _before_market_close()
+        from trade_calendar import is_trade_date, get_trade_dates
+        is_today_trade = is_trade_date(today_str)
     except Exception:
-        force_refresh = False
+        is_today_trade = False
 
-    eff_anchor = anchor or today_str
+    if is_today_trade and _before_market_close():
+        # 盘中: 锚点用上一个已完成交易日 (今天数据不完整, 不宜做锚点)
+        force_refresh = True
+        try:
+            all_dates = get_trade_dates("2020-01-01", today_str)
+            # 倒数第一个是今天, 倒数第二个是上一个已完成交易日
+            eff_anchor = all_dates[-2] if len(all_dates) >= 2 else anchor or today_str
+        except Exception:
+            eff_anchor = anchor or today_str
+    else:
+        force_refresh = False
+        eff_anchor = anchor or today_str
+
     if not eff_anchor:
         logger.warning("无交易日锚点, 跳过数据更新")
         return
