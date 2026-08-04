@@ -50,6 +50,12 @@ def get_candidate_sectors() -> pd.DataFrame:
     return df
 
 
+def get_all_sectors() -> pd.DataFrame:
+    """取 sector_daily 中所有板块"""
+    df = _query("SELECT DISTINCT board_code, board_name FROM sector_daily")
+    return df
+
+
 def get_non_candidate_sectors() -> pd.DataFrame:
     """取非候选板块 (全部板块 - 最新候选板块)"""
     df = _query(
@@ -197,11 +203,11 @@ def _screen_one_board(board_code: str, board_name: str, dates: list,
 
 
 def screen_candidate_stocks(identified_date: str = "") -> pd.DataFrame:
-    """候选板块: 严格筛选(strict) + 强于板块(strong)"""
+    """所有板块: 严格筛选(strict) + 强于板块(strong)"""
     identified_at = identified_date or date.today().isoformat()
-    sectors = get_candidate_sectors()
+    sectors = get_all_sectors()
     if sectors.empty:
-        logger.warning("候选板块为空，请先运行 sector_screen.py")
+        logger.warning("sector_daily 无板块数据")
         return pd.DataFrame()
 
     all_candidates = []
