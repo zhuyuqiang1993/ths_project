@@ -1,6 +1,6 @@
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import schedule
 from loguru import logger
@@ -50,30 +50,85 @@ def db_latest_date(table: str) -> str | None:
         return None
 
 
-def _data_is_current(table: str, anchor: str | None) -> bool:
-    """库内最新日期是否已覆盖锚点 (非交易日/无新数据则跳过更新, 幂等)"""
-    if not anchor:
+MARKET_CLOSE = (15, 30)
+SKIP_WINDOW_DAYS = 5     # 近5个交易日数据已存在则跳过更新
+ENSURE_WINDOW_DAYS = 10  # 需要刷新时, 保证近10个交易日数据存在
+
+
+def _before_market_close() -> bool:
+    """当前时间是否早于 15:30 (盘中)"""
+    now = datetime.now()
+    return (now.hour, now.minute) < MARKET_CLOSE
+
+
+def _recent_trade_dates(anchor: str, n: int) -> list:
+    """anchor 往前 n 个交易日 (含 anchor), 按升序返回"""
+    from trade_calendar import get_trade_dates
+    d = datetime.strptime(anchor, "%Y-%m-%d")
+    lookback_start = (d - timedelta(days=n * 3 + 15)).strftime("%Y-%m-%d")
+    dates = get_trade_dates(lookback_start, anchor)
+    return dates[-n:]
+
+
+def _has_recent_days(table: str, dates: list) -> bool:
+    """表内是否已存在 dates 中全部交易日的记录"""
+    if not dates:
         return False
-    latest = db_latest_date(table)
-    return bool(latest and latest >= anchor)
+    placeholders = ",".join(["%s"] * len(dates))
+    try:
+        from db_handler import get_connection
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT COUNT(DISTINCT `date`) FROM {table} WHERE `date` IN ({placeholders})",
+                tuple(dates),
+            )
+            return cur.fetchone()[0] >= len(dates)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"检查 {table} 近{len(dates)}个交易日数据失败: {e}")
+        return False
 
 
 def run_updates(anchor: str | None):
-    """数据更新: 板块 -> 个股 -> ETF (以最近交易日为锚点, 无新数据自动跳过)"""
-    today = date.today().strftime("%Y-%m-%d")
+    """数据更新: 板块 -> 个股 -> ETF (增量, 避免全量重拉)。
+
+    - 交易日 15:30 之前: 需要拉取当日(盘中)数据, 强制刷新近10个交易日窗口
+    - 其余时间: 若近5个交易日数据已存在则跳过; 否则只增量拉取近10个交易日窗口
+    """
+    today_str = date.today().strftime("%Y-%m-%d")
+    try:
+        from trade_calendar import is_trade_date
+        force_refresh = is_trade_date(today_str) and _before_market_close()
+    except Exception:
+        force_refresh = False
+
+    eff_anchor = anchor or today_str
+    if not eff_anchor:
+        logger.warning("无交易日锚点, 跳过数据更新")
+        return
+
+    mode = "盘中(15:30前)-强制拉取当日" if force_refresh else "收盘后-增量检测"
+    logger.info(f"数据更新模式: {mode}, 锚点={eff_anchor}")
+
     steps = [
-        ("板块", "sector_daily", lambda: _import_run("sector_service"), {}),
-        ("个股", "stock_daily",
-         lambda: _import_run("stock_daily", start_date=today, end_date=today), {}),
-        ("ETF", "etf_daily", lambda: _import_run("etf_service"), {}),
+        ("板块", "sector_daily", "sector_service", "YYYYMMDD"),
+        ("个股", "stock_daily", "stock_daily", "YYYY-MM-DD"),
+        ("ETF", "etf_daily", "etf_service", "YYYYMMDD"),
     ]
-    for name, table, run_fn, _ in steps:
-        if _data_is_current(table, anchor):
-            logger.info(f"[{name}] 数据已是最新 (锚点 {anchor}), 跳过更新")
+    for name, table, module, fmt in steps:
+        if not force_refresh and _has_recent_days(table, _recent_trade_dates(eff_anchor, SKIP_WINDOW_DAYS)):
+            logger.info(f"[{name}] 近{SKIP_WINDOW_DAYS}个交易日数据已存在 (至 {eff_anchor}), 跳过更新")
             continue
-        logger.info(f"===== [{name}] 数据更新 =====")
+        dates = _recent_trade_dates(eff_anchor, ENSURE_WINDOW_DAYS)
+        start, end = dates[0], dates[-1]
+        if fmt == "YYYYMMDD":
+            start, end = start.replace("-", ""), end.replace("-", "")
+        logger.info(f"===== [{name}] 增量更新: {start} ~ {end} =====")
         try:
-            run_fn()
+            _import_run(module, start_date=start, end_date=end)
         except Exception as e:
             logger.error(f"{name}更新失败: {e}")
 
@@ -125,7 +180,7 @@ def job():
     logger.info(f"最近交易日锚点: {anchor}")
     run_updates(anchor)
     run_screens()
-    #send_daily_email()
+    send_daily_email()
     logger.info(f"=== 每日定时任务结束 (耗时 {round(time.time() - t0, 1)}s) ===")
 
 
