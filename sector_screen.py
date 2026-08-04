@@ -1,12 +1,23 @@
+"""板块筛选模块 (v2)
+
+筛选逻辑: 多因子评分模型
+- 动量 (40%): 20日收益率在全部板块中的百分位排名
+- 趋势 (30%): 收盘价是否站上20日均线
+- 量能 (20%): 5日均量/20日均量 (量能扩张比)
+- 涨跌家数 (10%): 板块内上涨家数 > 下跌家数
+
+候选条件: 综合得分 >= 3 (满分 5)
+"""
+
 import sys
 import warnings
-from datetime import date, datetime
+from datetime import date, timedelta
 
 import pandas as pd
 from loguru import logger
 
 from config import CONFIG
-from db_handler import get_connection, save_candidate_sector_to_db, create_tables
+from db_handler import get_connection, create_tables, save_candidate_sector_to_db
 
 warnings.filterwarnings("ignore", message=".*only supports SQLAlchemy.*")
 
@@ -23,108 +34,160 @@ logger.add(
     level="DEBUG",
 )
 
-SCREEN_WINDOW = 5
+DATA_WINDOW = 60        # 加载历史天数 (用于计算MA20/MA60)
+MOMENTUM_WINDOW = 20    # 动量回看窗口
+MA_SHORT = 20
+MA_LONG = 60
+VOL_SHORT = 5
+VOL_LONG = 20
+MIN_SCORE = 3           # 候选最低分 (满分5)
 
-# 与 sector_daily 列名保持一致
-_COLS = ["board_code", "board_name", "date", "low", "high", "close",
-         "prev_close", "volume", "amount", "pct_chg", "change",
-         "advance", "decline", "net_inflow"]
+_WEIGHTS = {"momentum": 0.4, "trend": 0.3, "volume": 0.2, "breadth": 0.1}
 
 
-def load_last_n_days(n: int = SCREEN_WINDOW) -> pd.DataFrame:
-    """加载每个板块最近 n 个交易日的数据"""
-    sql = f"""
-        SELECT board_code, board_name, date, low, high, close,
-               prev_close, volume, amount, pct_chg, `change`,
-               advance, decline, net_inflow
-        FROM (
-            SELECT sd.*, ROW_NUMBER() OVER (
-                PARTITION BY board_code ORDER BY date DESC) AS rn
-            FROM sector_daily sd
-        ) t WHERE rn <= {n}
-        ORDER BY board_code, date
-    """
+def _query(sql: str, params: tuple = ()) -> pd.DataFrame:
     conn = get_connection()
     try:
-        df = pd.read_sql(sql, conn)
+        df = pd.read_sql(sql, conn, params=params)
     finally:
         conn.close()
     return df
 
 
-def _pass_screen(closes: list, vols: list) -> bool:
-    """量价配合筛选:
-    - 条件1: 5日收盘指数增长 (close[-1] > close[0])
-    - 条件2: 指数涨时成交量同步增大, 指数跌时成交量缩小
+def load_sector_data(days: int = DATA_WINDOW) -> pd.DataFrame:
+    """加载所有板块最近 N 天数据"""
+    sql = """
+        SELECT board_code, board_name, date, close, volume,
+               advance, decline
+        FROM sector_daily
+        WHERE date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+        ORDER BY board_code, date
     """
-    if len(closes) < SCREEN_WINDOW:
-        return False
-    if closes[-1] <= closes[0]:
-        return False
-    for i in range(1, len(closes)):
-        if closes[i] > closes[i - 1]:
-            if vols[i] < vols[i - 1]:
-                return False
-        elif closes[i] < closes[i - 1]:
-            if vols[i] > vols[i - 1]:
-                return False
-    return True
+    return _query(sql, (days + 30,))
+
+
+def _score_one_sector(grp: pd.DataFrame) -> dict:
+    """对单个板块进行多因子打分"""
+    grp = grp.sort_values("date").reset_index(drop=True)
+    n = len(grp)
+
+    # === 动量分 (原始: 20日收益率) ===
+    if n >= MOMENTUM_WINDOW + 1:
+        ret_20d = (grp["close"].iloc[-1] / grp["close"].iloc[-MOMENTUM_WINDOW] - 1) * 100
+    else:
+        ret_20d = 0.0
+
+    # === 趋势分: 收盘 > MA20 ===
+    if n >= MA_SHORT:
+        ma20 = grp["close"].rolling(MA_SHORT).mean().iloc[-1]
+        above_ma20 = grp["close"].iloc[-1] > ma20
+    else:
+        above_ma20 = False
+
+    # === 量能分: 5日均量/20日均量 ===
+    if n >= VOL_LONG:
+        vol_5 = grp["volume"].tail(VOL_SHORT).mean()
+        vol_20 = grp["volume"].tail(VOL_LONG).mean()
+        vol_ratio = vol_5 / vol_20 if vol_20 > 0 else 0
+        vol_expanding = vol_ratio > 1.1
+    else:
+        vol_ratio = 0
+        vol_expanding = False
+
+    # === 涨跌家数分 ===
+    adv = grp["advance"].iloc[-1] if pd.notna(grp["advance"].iloc[-1]) else None
+    dec = grp["decline"].iloc[-1] if pd.notna(grp["decline"].iloc[-1]) else None
+    breadth_ok = (adv is not None and dec is not None and adv > dec)
+
+    return {
+        "ret_20d": round(ret_20d, 4),
+        "above_ma20": above_ma20,
+        "vol_ratio": round(vol_ratio, 4),
+        "vol_expanding": vol_expanding,
+        "breadth_ok": breadth_ok,
+    }
 
 
 def screen_sectors(identified_date: str = "") -> pd.DataFrame:
+    """板块多因子筛选"""
     identified_at = identified_date or date.today().isoformat()
-    df = load_last_n_days()
+    df = load_sector_data()
     if df.empty:
         logger.warning("sector_daily 无数据")
         return pd.DataFrame()
 
-    candidates = []
+    scores = []
     for board_code, grp in df.groupby("board_code"):
-        grp = grp.sort_values("date").reset_index(drop=True)
-        closes = grp["close"].astype(float).tolist()
-        vols = grp["volume"].fillna(0).astype(float).tolist()
-        if not _pass_screen(closes, vols):
+        if len(grp) < MA_SHORT:
             continue
 
-        last = grp.iloc[-1]
-        chg_5d = round((closes[-1] / closes[0] - 1) * 100, 4) if closes[0] else 0
-        row = {
+        last = grp.sort_values("date").iloc[-1]
+        sc = _score_one_sector(grp)
+
+        scores.append({
             "board_code": board_code,
             "board_name": last["board_name"],
             "date": last["date"],
             "identified_at": identified_at,
-            "low": last["low"], "high": last["high"], "close": last["close"],
-            "prev_close": last["prev_close"], "volume": last["volume"],
-            "amount": last["amount"], "pct_chg": last["pct_chg"],
-            "change": last["change"], "advance": last["advance"],
-            "decline": last["decline"], "net_inflow": last["net_inflow"],
-            "chg_5d": chg_5d,
-        }
-        candidates.append(row)
-        logger.info(f"  [候选] {board_code} {last['board_name']} "
-                    f"收盘={last['close']} 5日涨幅={chg_5d}%")
+            "close": last["close"],
+            "ret_20d": sc["ret_20d"],
+            "above_ma20": sc["above_ma20"],
+            "vol_expanding": sc["vol_expanding"],
+            "breadth_ok": sc["breadth_ok"],
+            "vol_ratio": sc["vol_ratio"],
+            "advance": last["advance"],
+            "decline": last["decline"],
+        })
 
-    if not candidates:
-        logger.warning("无板块通过筛选")
+    if not scores:
         return pd.DataFrame()
 
-    result = pd.DataFrame(candidates)
-    return result[_COLS + ["identified_at", "chg_5d"]]
+    result = pd.DataFrame(scores)
+
+    # 计算动量百分位 (全局排名)
+    if len(result) > 1:
+        result["momentum_pct"] = result["ret_20d"].rank(pct=True) * 100
+    else:
+        result["momentum_pct"] = 50.0
+
+    # 综合得分
+    result["score"] = (
+        (result["momentum_pct"] / 100 * 5 * _WEIGHTS["momentum"])
+        + (result["above_ma20"].astype(float) * 5 * _WEIGHTS["trend"])
+        + (result["vol_expanding"].astype(float) * 5 * _WEIGHTS["volume"])
+        + (result["breadth_ok"].astype(float) * 5 * _WEIGHTS["breadth"])
+    ).round(2)
+
+    # 筛选候选
+    candidates = result[result["score"] >= MIN_SCORE].copy()
+    candidates = candidates.sort_values("score", ascending=False)
+
+    return candidates
 
 
 def run(identified_date: str = ""):
     create_tables()
-    logger.info(f"===== 板块筛选开始 (识别日期: {identified_date or date.today().isoformat()}) =====")
+    identified_at = identified_date or date.today().isoformat()
+    logger.info(f"===== 板块筛选开始 (识别日期: {identified_at}) =====")
+
     df = screen_sectors(identified_date)
     if df.empty:
         logger.warning("===== 板块筛选结束: 无候选 =====")
         return df
 
-    save_candidate_sector_to_db(df)
+    # 落库字段
+    save_cols = ["board_code", "board_name", "date", "identified_at",
+                 "close", "score", "ret_20d", "vol_ratio"]
+    save_df = df[[c for c in save_cols if c in df.columns]].copy()
+    save_candidate_sector_to_db(save_df)
+
     logger.info(f"候选板块 {len(df)} 个, 已保存到 candidate_sector")
-    for _, r in df.iterrows():
+    top = df.head(20)
+    for _, r in top.iterrows():
         logger.info(f"  {r['board_code']} {r['board_name']} "
-                    f"日期={r['date']} 5日涨幅={r['chg_5d']}%")
+                     f"得分={r['score']} 20日涨幅={r['ret_20d']}% "
+                     f"站上MA20={'是' if r['above_ma20'] else '否'} "
+                     f"量能比={r['vol_ratio']}")
     return df
 
 

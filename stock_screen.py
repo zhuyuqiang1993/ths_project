@@ -1,6 +1,18 @@
+"""股票筛选模块 (v2)
+
+多因子评分模型:
+- 趋势 (25%): 价格 > MA20, MA20 > MA60 (多头排列)
+- 动量 (30%): RPS 20日/60日 (全市场相对强度百分位)
+- 量价 (20%): 上涨日放量, 下跌日缩量 (5日窗口)
+- MACD (15%): 金叉状态, 柱状图为正且增强
+- 板块 (10%): 所在板块评分 >= 3
+
+候选条件: 综合得分 >= 3.0 (满分 5)
+"""
+
 import sys
 import warnings
-from datetime import date, datetime
+from datetime import date, timedelta
 
 import pandas as pd
 from loguru import logger
@@ -27,9 +39,19 @@ logger.add(
     level="DEBUG",
 )
 
-SCREEN_WINDOW = 5
-PASS_DAYS = 3
-UP_AMPLITUDE_THRESHOLD = 5.0
+DATA_WINDOW = 60
+MA_SHORT = 20
+MA_LONG = 60
+RPS_WINDOWS = [20, 60]
+MIN_SCORE = 3.0
+
+_WEIGHTS = {
+    "trend": 0.25,
+    "momentum": 0.30,
+    "volume": 0.20,
+    "macd": 0.15,
+    "sector": 0.10,
+}
 
 
 def _query(sql: str, params: tuple = ()) -> pd.DataFrame:
@@ -41,252 +63,236 @@ def _query(sql: str, params: tuple = ()) -> pd.DataFrame:
     return df
 
 
-def get_candidate_sectors() -> pd.DataFrame:
-    """取最新一次识别出的候选板块"""
-    df = _query(
-        """SELECT board_code, board_name FROM candidate_sector
-           WHERE identified_at = (SELECT MAX(identified_at) FROM candidate_sector)"""
-    )
-    return df
-
-
-def get_all_sectors() -> pd.DataFrame:
-    """取 sector_daily 中所有板块"""
-    df = _query("SELECT DISTINCT board_code, board_name FROM sector_daily")
-    return df
-
-
-def get_non_candidate_sectors() -> pd.DataFrame:
-    """取非候选板块 (全部板块 - 最新候选板块)"""
-    df = _query(
-        """SELECT DISTINCT sd.board_code, sd.board_name
-           FROM sector_daily sd
-           WHERE sd.board_code NOT IN (
-               SELECT board_code FROM candidate_sector
-               WHERE identified_at = (SELECT MAX(identified_at) FROM candidate_sector)
-           )"""
-    )
-    return df
-
-
-def get_sector_last_n_days(board_code: str, n: int = SCREEN_WINDOW) -> pd.DataFrame:
-    return _query(
-        """SELECT date, pct_chg FROM sector_daily
-           WHERE board_code = %s ORDER BY date DESC LIMIT %s""",
-        (board_code, n),
-    )
-
-
-def get_board_stocks(board_code: str, dates: list) -> pd.DataFrame:
-    placeholders = ",".join(["%s"] * len(dates))
-    return _query(
-        f"""SELECT code, name, date, open, pct_chg, prev_close, volume, macd
-            FROM stock_daily
-            WHERE board_code = %s AND date IN ({placeholders})
-            ORDER BY code, date""",
-        (board_code, *dates),
-    )
-
-
-def _pass_vol_price(closes: list, vols: list) -> bool:
-    """量价配合筛选 (5日窗口):
-    - 上涨日 (close[i] > close[i-1]):
-        放量 (volume[i] >= volume[i-1]) 通过;
-        缩量上涨 (volume[i] < volume[i-1]) 允许, 但当日涨幅必须 > 5% (例外不限天数)
-    - 下跌日 (close[i] < close[i-1]): 必须缩量 (volume[i] <= volume[i-1]),
-      判定周期内所有下跌日均需满足
-    - 平盘日不参与判断; 缺量的日子跳过
+def load_all_stock_data(days: int = DATA_WINDOW) -> pd.DataFrame:
+    """加载所有股票最近 N 天数据 (含 MACD)"""
+    sql = """
+        SELECT code, name, board_code, board_name, date, close, volume,
+               open, pct_chg, macd, macd_signal, macd_hist
+        FROM stock_daily
+        WHERE date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+        ORDER BY code, date
     """
-    for i in range(1, len(closes)):
-        if vols[i] is None or vols[i - 1] is None or pd.isna(vols[i]) or pd.isna(vols[i - 1]):
-            continue
-        if closes[i] > closes[i - 1]:
-            if vols[i] < vols[i - 1] and (closes[i] / closes[i - 1] - 1) * 100 <= UP_AMPLITUDE_THRESHOLD:
-                return False
-        elif closes[i] < closes[i - 1]:
-            if vols[i] > vols[i - 1]:
-                return False
-    return True
+    return _query(sql, (days + 30,))
 
 
-def _count_relative_strength_days(stock_pcts: list, sector_pcts: list) -> int:
-    """统计近5日个股强于板块的天数, 每满足一日计1:
-    - 板块涨(sp>0): 个股也涨, 且涨幅 > 板块涨幅 (stp > sp)
-    - 板块跌(sp<0): 个股也跌, 且跌幅 < 板块跌幅 (sp < stp < 0)
-    - 板块平盘(sp==0): 该日不计
+def calc_global_rps(all_data: pd.DataFrame, windows: list = RPS_WINDOWS) -> pd.DataFrame:
+    """计算全市场 RPS
+
+    返回 DataFrame: index=date, columns=codes, 每个窗口一个 RPS 列
     """
-    ok = 0
-    for sp, stp in zip(sector_pcts, stock_pcts):
-        if sp is None or stp is None or (isinstance(stp, float) and pd.isna(stp)):
+    # 透视: index=date, columns=code, values=close
+    close_pivot = all_data.pivot_table(index="date", columns="code", values="close")
+    close_pivot = close_pivot.sort_index()
+
+    rps_all = pd.DataFrame(index=close_pivot.index)
+    for w in windows:
+        if len(close_pivot) < w + 1:
+            rps_all[f"rps_{w}"] = pd.Series(50.0, index=close_pivot.index)
             continue
-        if sp > 0:
-            if stp > sp:
-                ok += 1
-        elif sp < 0:
-            if stp < 0 and stp > sp:
-                ok += 1
-    return ok
+        returns = close_pivot.pct_change(w)
+        rps_all[f"rps_{w}"] = returns.rank(axis=1, pct=True).mean(axis=1) * 100
+
+    return rps_all
 
 
-def _screen_one_board(board_code: str, board_name: str, dates: list,
-                      sector_pcts: list, identified_at: str,
-                      with_macd: bool, check_vol: bool) -> list:
-    """筛选单个板块下满足条件的个股。
-    - with_macd: 是否要求 MACD>0 (strict/strong 要求, vol_price 不要求)
-    - check_vol: 是否要求量价配合 (strict/vol_price 要求, strong 不要求)
-    返回候选 dict 列表 (含 tag)
-    """
-    stocks = get_board_stocks(board_code, dates)
-    if stocks.empty:
-        return []
+def _score_one_stock(grp: pd.DataFrame, rps_row: pd.Series,
+                      sector_score: float) -> dict:
+    """对单个股票进行多因子打分"""
+    grp = grp.sort_values("date").reset_index(drop=True)
+    n = len(grp)
 
-    out = []
-    for code, grp in stocks.groupby("code"):
-        grp = grp.set_index("date").reindex(dates).reset_index()
-        if grp["pct_chg"].isna().any() or grp["prev_close"].isna().any():
-            continue
-        stock_pcts = grp["pct_chg"].astype(float).tolist()
+    # === 趋势分 (0-1) ===
+    trend_score = 0.0
+    if n >= MA_LONG:
+        ma20 = grp["close"].rolling(MA_SHORT).mean().iloc[-1]
+        ma60 = grp["close"].rolling(MA_LONG).mean().iloc[-1]
+        price = grp["close"].iloc[-1]
+        if price > ma20:
+            trend_score += 0.5
+        if ma20 > ma60:
+            trend_score += 0.5
 
-        # close = prev_close * (1 + pct_chg/100)
-        closes = [
-            float(prev) * (1 + float(pct) / 100)
-            for prev, pct in zip(grp["prev_close"].astype(float), grp["pct_chg"].astype(float))
-        ]
+    # === 动量分: RPS (0-1) ===
+    momentum_score = 0.0
+    if "rps_20" in rps_row and pd.notna(rps_row["rps_20"]):
+        rps20 = rps_row["rps_20"]
+        if rps20 >= 80:
+            momentum_score += 0.5
+        elif rps20 >= 70:
+            momentum_score += 0.3
+    if "rps_60" in rps_row and pd.notna(rps_row["rps_60"]):
+        rps60 = rps_row["rps_60"]
+        if rps60 >= 70:
+            momentum_score += 0.5
+        elif rps60 >= 60:
+            momentum_score += 0.3
+
+    # === 量价分 (0-1) ===
+    volume_score = 0.0
+    if n >= 6:
+        closes = grp["close"].tolist()
         vols = grp["volume"].tolist()
+        vol_price_ok = 0
+        vol_total = 0
+        for i in range(max(1, n - 5), n):
+            if vols[i] is None or vols[i - 1] is None or pd.isna(vols[i]) or pd.isna(vols[i - 1]):
+                continue
+            vol_total += 1
+            if closes[i] > closes[i - 1] and vols[i] >= vols[i - 1]:
+                vol_price_ok += 1
+            elif closes[i] < closes[i - 1] and vols[i] <= vols[i - 1]:
+                vol_price_ok += 1
+        if vol_total > 0 and vol_price_ok / vol_total >= 0.6:
+            volume_score = 1.0
+        elif vol_total > 0 and vol_price_ok / vol_total >= 0.4:
+            volume_score = 0.5
+
+    # === MACD 分 (0-1) ===
+    macd_score = 0.0
+    if n >= 2:
+        macd_val = grp["macd"].iloc[-1] if pd.notna(grp["macd"].iloc[-1]) else 0
+        signal_val = grp["macd_signal"].iloc[-1] if pd.notna(grp["macd_signal"].iloc[-1]) else 0
+        hist_val = grp["macd_hist"].iloc[-1] if pd.notna(grp["macd_hist"].iloc[-1]) else 0
+        hist_prev = grp["macd_hist"].iloc[-2] if pd.notna(grp["macd_hist"].iloc[-2]) else 0
+
+        if macd_val > signal_val:
+            macd_score += 0.3
+        if hist_val > 0:
+            macd_score += 0.35
+        if hist_val > hist_prev:
+            macd_score += 0.35
+
+    # === 板块分 (0-1) ===
+    sector_score_norm = min(sector_score / 5.0, 1.0) if sector_score else 0
+
+    total = (
+        trend_score * _WEIGHTS["trend"]
+        + momentum_score * _WEIGHTS["momentum"]
+        + volume_score * _WEIGHTS["volume"]
+        + macd_score * _WEIGHTS["macd"]
+        + sector_score_norm * _WEIGHTS["sector"]
+    )
+
+    return {
+        "trend": round(trend_score, 2),
+        "momentum": round(momentum_score, 2),
+        "volume": round(volume_score, 2),
+        "macd": round(macd_score, 2),
+        "sector": round(sector_score_norm, 2),
+        "score": round(total, 4),
+    }
+
+
+def _load_sector_scores(identified_at: str) -> dict:
+    """加载最新板块评分"""
+    sql = """
+        SELECT board_code, score
+        FROM candidate_sector
+        WHERE identified_at = (SELECT MAX(identified_at) FROM candidate_sector)
+    """
+    df = _query(sql)
+    if df.empty:
+        return {}
+    return dict(zip(df["board_code"], df["score"]))
+
+
+def screen_stocks(identified_date: str = "") -> pd.DataFrame:
+    """股票多因子筛选"""
+    identified_at = identified_date or date.today().isoformat()
+
+    logger.info("加载股票数据...")
+    all_data = load_all_stock_data()
+    if all_data.empty:
+        logger.warning("stock_daily 无数据")
+        return pd.DataFrame()
+
+    logger.info("计算全市场 RPS...")
+    rps_all = calc_global_rps(all_data)
+
+    sector_scores = _load_sector_scores(identified_at)
+
+    scores = []
+    total_stocks = all_data["code"].nunique()
+    logger.info(f"共 {total_stocks} 只股票, 开始评分...")
+
+    for i, (code, grp) in enumerate(all_data.groupby("code"), 1):
+        if i % 500 == 0:
+            logger.info(f"  进度: {i}/{total_stocks}")
+
+        grp = grp.sort_values("date").reset_index(drop=True)
+        if len(grp) < MA_SHORT:
+            continue
 
         last = grp.iloc[-1]
-        macd = last["macd"]
-        if with_macd and (macd is None or (isinstance(macd, float) and pd.isna(macd)) or macd <= 0):
-            continue
+        date_val = last["date"]
 
-        ok_days = _count_relative_strength_days(stock_pcts, sector_pcts)
-        avg_rel = round(sum(s - b for s, b in zip(stock_pcts, sector_pcts)) / SCREEN_WINDOW, 4)
+        # RPS
+        rps_row = rps_all.loc[date_val] if date_val in rps_all.index else pd.Series(dtype=float)
 
-        tags = set()
-        if with_macd:
-            # strict: 最近交易日强于板块 + 多数日强于板块(>=3/5) + 量价(>=3/5) + MACD>0
-            # strong: 多数日强于板块(>=3/5) + MACD>0
-            if stock_pcts[-1] > sector_pcts[-1] and ok_days >= PASS_DAYS \
-                    and (not check_vol or _pass_vol_price(closes, vols)):
-                tags.add("strict")
-            if ok_days >= PASS_DAYS:
-                tags.add("strong")
+        # 板块得分
+        bc = last.get("board_code", "")
+        sc = _score_one_stock(grp, rps_row, sector_scores.get(bc, 0))
+
+        # 5日涨幅
+        if len(grp) >= 6:
+            chg_5d = round((grp["close"].iloc[-1] / grp["close"].iloc[-6] - 1) * 100, 4)
         else:
-            # vol_price: 最近交易日强于板块 + 多数日强于板块(>=3/5) + 量价(>=3/5), 不要求MACD
-            if stock_pcts[-1] > sector_pcts[-1] and ok_days >= PASS_DAYS \
-                    and (not check_vol or _pass_vol_price(closes, vols)):
-                tags.add("vol_price")
+            chg_5d = 0
 
-        if not tags:
-            continue
+        scores.append({
+            "code": code,
+            "name": last["name"],
+            "board_code": bc,
+            "board_name": last.get("board_name", ""),
+            "date": date_val,
+            "identified_at": identified_at,
+            "open": last.get("open"),
+            "close": last["close"],
+            "pct_chg": last.get("pct_chg"),
+            "macd": last.get("macd"),
+            "chg_5d": chg_5d,
+            "avg_rel": rps_row.get("rps_20", 50) if "rps_20" in rps_row.index else 50,
+            "tag": "stock",
+            "trend": sc["trend"],
+            "momentum": sc["momentum"],
+            "volume": sc["volume"],
+            "macd_score": sc["macd"],
+            "sector_score": sc["sector"],
+            "score": sc["score"],
+            "rps_20": rps_row.get("rps_20", 50) if "rps_20" in rps_row.index else 50,
+            "rps_60": rps_row.get("rps_60", 50) if "rps_60" in rps_row.index else 50,
+        })
 
-        close = round(closes[-1], 2)
-        chg_5d = round((closes[-1] / closes[0] - 1) * 100, 4) if closes[0] else 0
-
-        for tag in sorted(tags):
-            out.append({
-                "code": code,
-                "name": last["name"],
-                "board_code": board_code,
-                "board_name": board_name,
-                "date": dates[-1],
-                "identified_at": identified_at,
-                "open": last["open"],
-                "close": close,
-                "pct_chg": last["pct_chg"],
-                "macd": macd,
-                "chg_5d": chg_5d,
-                "avg_rel": avg_rel,
-                "tag": tag,
-            })
-    return out
-
-
-def screen_candidate_stocks(identified_date: str = "") -> pd.DataFrame:
-    """所有板块: 严格筛选(strict) + 强于板块(strong)"""
-    identified_at = identified_date or date.today().isoformat()
-    sectors = get_all_sectors()
-    if sectors.empty:
-        logger.warning("sector_daily 无板块数据")
+    if not scores:
         return pd.DataFrame()
 
-    all_candidates = []
-    for _, sector in sectors.iterrows():
-        board_code = sector["board_code"]
-        board_name = sector["board_name"]
-
-        sector_df = get_sector_last_n_days(board_code)
-        if len(sector_df) < SCREEN_WINDOW:
-            logger.debug(f"  {board_code} 板块数据不足5日, 跳过")
-            continue
-        sector_df = sector_df.sort_values("date").reset_index(drop=True)
-        dates = sector_df["date"].tolist()
-        sector_pcts = sector_df["pct_chg"].astype(float).tolist()
-
-        res = _screen_one_board(board_code, board_name, dates, sector_pcts,
-                                identified_at, with_macd=True, check_vol=True)
-        all_candidates.extend(res)
-        strict_cnt = sum(1 for r in res if r["tag"] == "strict")
-        strong_cnt = sum(1 for r in res if r["tag"] == "strong")
-        logger.info(f"  [{board_code}] {board_name}: 严格筛选 {strict_cnt} 只, 强于板块 {strong_cnt} 只")
-
-    if not all_candidates:
-        logger.warning("无个股通过筛选")
-        return pd.DataFrame()
-    return pd.DataFrame(all_candidates)
-
-
-def screen_vol_price_stocks(identified_date: str = "") -> pd.DataFrame:
-    """非候选板块: 量价股票(vol_price), 严格条件但不过滤 MACD"""
-    identified_at = identified_date or date.today().isoformat()
-    sectors = get_non_candidate_sectors()
-    if sectors.empty:
-        logger.warning("无非候选板块")
-        return pd.DataFrame()
-
-    all_candidates = []
-    for _, sector in sectors.iterrows():
-        board_code = sector["board_code"]
-        board_name = sector["board_name"]
-
-        sector_df = get_sector_last_n_days(board_code)
-        if len(sector_df) < SCREEN_WINDOW:
-            continue
-        sector_df = sector_df.sort_values("date").reset_index(drop=True)
-        dates = sector_df["date"].tolist()
-        sector_pcts = sector_df["pct_chg"].astype(float).tolist()
-
-        res = _screen_one_board(board_code, board_name, dates, sector_pcts,
-                                identified_at, with_macd=False, check_vol=True)
-        all_candidates.extend(res)
-
-    if not all_candidates:
-        logger.warning("非候选板块中无量价股票通过筛选")
-        return pd.DataFrame()
-    return pd.DataFrame(all_candidates)
+    result = pd.DataFrame(scores)
+    candidates = result[result["score"] >= MIN_SCORE].copy()
+    candidates = candidates.sort_values("score", ascending=False)
+    logger.info(f"评分完成: {len(result)} 只, 候选 {len(candidates)} 只")
+    return candidates
 
 
 def run(identified_date: str = ""):
     create_tables()
     identified_at = identified_date or date.today().isoformat()
-    logger.info(f"===== 候选股票筛选开始 (识别日期: {identified_at}) =====")
+    logger.info(f"===== 股票筛选开始 (识别日期: {identified_at}) =====")
 
-    df_strict = screen_candidate_stocks(identified_at)
-    df_vol = screen_vol_price_stocks(identified_at)
+    df = screen_stocks(identified_date)
+    if df.empty:
+        logger.warning("===== 股票筛选结束: 无候选 =====")
+        return df
 
-    frames = [df for df in (df_strict, df_vol) if not df.empty]
-    if not frames:
-        logger.warning("===== 候选股票筛选结束: 无候选 =====")
-        return pd.DataFrame()
-
-    df = pd.concat(frames, ignore_index=True)
     save_candidate_stock_to_db(df, replace_date=True)
-    logger.info(f"候选股票 {len(df)} 条, 已保存到 candidate_stock "
-                f"({'; '.join(f'{t}={int((df['tag']==t).sum())}' for t in sorted(df['tag'].unique()))})")
-    top = df.sort_values("avg_rel", ascending=False).head(20)
+    logger.info(f"候选股票 {len(df)} 条, 已保存到 candidate_stock")
+
+    top = df.sort_values("score", ascending=False).head(20)
     for _, r in top.iterrows():
-        logger.info(f"  [{r['tag']}] {r['code']} {r['name']} [{r['board_name']}] "
-                    f"涨幅={r['pct_chg']}% 5日={r['chg_5d']}% macd={r['macd']}")
+        logger.info(f"  {r['code']} {r['name']} [{r['board_name']}] "
+                     f"得分={r['score']} RPS20={r['rps_20']:.0f} "
+                     f"RPS60={r['rps_60']:.0f} "
+                     f"趋势={r['trend']} 动量={r['momentum']} "
+                     f"量价={r['volume']} MACD={r['macd_score']}")
     return df
 
 
