@@ -255,7 +255,7 @@ def screen_stocks(identified_date: str = "") -> pd.DataFrame:
             "tag": "stock",
             "trend": sc["trend"],
             "momentum": sc["momentum"],
-            "volume": sc["volume"],
+            "volume_score": sc["volume"],
             "macd_score": sc["macd"],
             "sector_score": sc["sector"],
             "score": sc["score"],
@@ -292,7 +292,7 @@ def run(identified_date: str = ""):
                      f"得分={r['score']} RPS20={r['rps_20']:.0f} "
                      f"RPS60={r['rps_60']:.0f} "
                      f"趋势={r['trend']} 动量={r['momentum']} "
-                     f"量价={r['volume']} MACD={r['macd_score']}")
+                     f"量价={r['volume_score']} MACD={r['macd_score']}")
     return df
 
 

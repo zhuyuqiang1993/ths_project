@@ -54,7 +54,7 @@ def _query(sql: str, params: tuple = ()) -> pd.DataFrame:
 def load_etf_data(days: int = DATA_WINDOW) -> pd.DataFrame:
     """加载所有ETF最近 N 天数据"""
     sql = """
-        SELECT code, name, date, close, volume, pct_chg
+        SELECT code, name, date, close, volume, pct_chg, prev_close, amount
         FROM etf_daily
         WHERE date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
         ORDER BY code, date
@@ -129,6 +129,9 @@ def screen_etfs(identified_date: str = "") -> pd.DataFrame:
             "identified_at": identified_at,
             "close": last["close"],
             "pct_chg": last.get("pct_chg"),
+            "prev_close": last.get("prev_close"),
+            "volume": last.get("volume"),
+            "amount": last.get("amount"),
             "ret_20d": sc["ret_20d"],
             "above_ma20": sc["above_ma20"],
             "vol_expanding": sc["vol_expanding"],
@@ -170,7 +173,8 @@ def run(identified_date: str = ""):
         return df
 
     save_cols = ["code", "name", "date", "identified_at", "close",
-                 "pct_chg", "score", "ret_20d", "vol_ratio", "chg_5d"]
+                 "pct_chg", "prev_close", "volume", "amount",
+                 "score", "ret_20d", "vol_ratio", "chg_5d"]
     save_df = df[[c for c in save_cols if c in df.columns]].copy()
     save_candidate_etf_to_db(save_df, replace_date=True)
 

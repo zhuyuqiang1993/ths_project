@@ -58,7 +58,8 @@ def load_sector_data(days: int = DATA_WINDOW) -> pd.DataFrame:
     """加载所有板块最近 N 天数据"""
     sql = """
         SELECT board_code, board_name, date, close, volume,
-               advance, decline
+               low, high, prev_close, amount, pct_chg, `change`,
+               advance, decline, net_inflow
         FROM sector_daily
         WHERE date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
         ORDER BY board_code, date
@@ -99,12 +100,29 @@ def _score_one_sector(grp: pd.DataFrame) -> dict:
     dec = grp["decline"].iloc[-1] if pd.notna(grp["decline"].iloc[-1]) else None
     breadth_ok = (adv is not None and dec is not None and adv > dec)
 
+    # === 5日涨幅 ===
+    if n >= 6:
+        chg_5d = round((grp["close"].iloc[-1] / grp["close"].iloc[-6] - 1) * 100, 4)
+    else:
+        chg_5d = 0
+
+    # 取最后一日的原始行情字段
+    last = grp.iloc[-1]
     return {
         "ret_20d": round(ret_20d, 4),
         "above_ma20": above_ma20,
         "vol_ratio": round(vol_ratio, 4),
         "vol_expanding": vol_expanding,
         "breadth_ok": breadth_ok,
+        "chg_5d": chg_5d,
+        "low": last.get("low"),
+        "high": last.get("high"),
+        "prev_close": last.get("prev_close"),
+        "volume": last.get("volume"),
+        "amount": last.get("amount"),
+        "pct_chg": last.get("pct_chg"),
+        "change": last.get("change"),
+        "net_inflow": last.get("net_inflow"),
     }
 
 
@@ -175,9 +193,12 @@ def run(identified_date: str = ""):
         logger.warning("===== 板块筛选结束: 无候选 =====")
         return df
 
-    # 落库字段
+    # 落库字段: 完整对应 candidate_sector DDL
     save_cols = ["board_code", "board_name", "date", "identified_at",
-                 "close", "score", "ret_20d", "vol_ratio"]
+                 "close", "score", "ret_20d", "vol_ratio",
+                 "low", "high", "prev_close", "volume", "amount",
+                 "pct_chg", "change", "advance", "decline",
+                 "net_inflow", "chg_5d"]
     save_df = df[[c for c in save_cols if c in df.columns]].copy()
     save_candidate_sector_to_db(save_df)
 
