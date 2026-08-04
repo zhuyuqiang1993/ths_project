@@ -148,13 +148,9 @@ def _has_recent_days(table: str, dates: list) -> bool:
 def run_updates(anchor: str | None):
     """数据更新: 板块 -> 个股 -> ETF (增量, 避免全量重拉)。
 
-    - 预检: 若当天是交易日且数据缺失, 先单独拉取当天数据
     - 交易日 15:30 之前: 锚点为上一个已完成交易日, 强制刷新近5个交易日窗口
-    - 收盘后: 锚点为当天, 若近5个交易日数据已存在则跳过; 否则增量拉取近60个交易日窗口
+    - 收盘后: 先预检当天数据是否缺失, 缺则补拉; 再做完整性判断和增量更新
     """
-    # 预检: 先确保当天数据就位 (盘中拉盘中快照, 收盘后拉完整日线)
-    _fetch_today_if_missing()
-
     today_str = date.today().strftime("%Y-%m-%d")
     try:
         from trade_calendar import is_trade_date, get_trade_dates
@@ -164,14 +160,16 @@ def run_updates(anchor: str | None):
 
     if is_today_trade and _before_market_close():
         # 盘中: 锚点用上一个已完成交易日 (今天数据不完整, 不宜做锚点)
+        # 不预检今天, 盘中数据不完整, 不需要拉
         force_refresh = True
         try:
             all_dates = get_trade_dates("2020-01-01", today_str)
-            # 倒数第一个是今天, 倒数第二个是上一个已完成交易日
             eff_anchor = all_dates[-2] if len(all_dates) >= 2 else anchor or today_str
         except Exception:
             eff_anchor = anchor or today_str
     else:
+        # 收盘后: 先预检当天数据, 缺则补拉
+        _fetch_today_if_missing()
         force_refresh = False
         eff_anchor = anchor or today_str
 
