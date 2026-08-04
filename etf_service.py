@@ -216,6 +216,13 @@ def build_etf_daily(
 def run(start_date: str = "", end_date: str = "", max_etfs: int = 0):
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
 
+    # 增量优化: 检查DB中是否已有目标日期范围的数据, 有则跳过API调用
+    if start_date and end_date:
+        from db_handler import has_data_in_range
+        if has_data_in_range("etf_daily", start_date, end_date):
+            logger.info("etf_daily 数据已存在, 跳过API拉取")
+            return pd.DataFrame()
+
     etf_list = get_etf_list()
     logger.info(f"共 {len(etf_list)} 只ETF")
 

@@ -379,6 +379,42 @@ def init_email_subscription():
         conn.close()
 
 
+def has_data_in_range(table: str, start_date: str, end_date: str,
+                      date_col: str = "date") -> bool:
+    """检查指定表在日期范围内是否已有数据, 用于避免冗余API调用。
+
+    Args:
+        table: 表名 (stock_daily / sector_daily / etf_daily)
+        start_date: 起始日期, 格式 YYYY-MM-DD 或 YYYYMMDD
+        end_date: 结束日期, 格式 YYYY-MM-DD 或 YYYYMMDD
+        date_col: 日期列名, 默认 "date"
+
+    Returns:
+        True = 数据已存在, 可跳过拉取; False = 需要拉取
+    """
+    s = start_date.replace("-", "")
+    e = end_date.replace("-", "")
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"""SELECT COUNT(DISTINCT `{date_col}`) FROM `{table}`
+                WHERE `{date_col}` BETWEEN %s AND %s""",
+            (s, e),
+        )
+        count = cursor.fetchone()[0]
+        if count > 0:
+            logger.info(f"[{table}] 已存在 {count} 个交易日数据 ({start_date} ~ {end_date}), 可跳过拉取")
+            return True
+        return False
+    except Exception as e:
+        logger.warning(f"检查 {table} 日期范围数据失败: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def save_stock_list_to_db(df: pd.DataFrame):
     ensure_table("stock_list")
     conn = get_connection()

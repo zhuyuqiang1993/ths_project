@@ -272,6 +272,13 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
 
     is_today = len(target_dates) == 1 and target_dates[0] == TODAY
 
+    # 增量优化: 非当日数据, 检查DB中是否已有目标日期范围的数据, 有则跳过API调用
+    if not is_today:
+        from db_handler import has_data_in_range
+        if has_data_in_range("stock_daily", target_dates[0], target_dates[-1]):
+            logger.info("stock_daily 数据已存在, 跳过API拉取")
+            return pd.DataFrame()
+
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("===== A股日级数据采集开始 =====")
