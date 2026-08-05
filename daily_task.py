@@ -52,7 +52,7 @@ def db_latest_date(table: str) -> str | None:
 
 MARKET_CLOSE = (15, 30)
 SKIP_WINDOW_DAYS = 5     # 近5个交易日数据已存在则跳过更新
-ENSURE_WINDOW_DAYS = 60  # 需要刷新时, 保证近60个交易日数据存在 (新筛选需MA60)
+ENSURE_WINDOW_DAYS = 70  # 需要刷新时, 保证近60个交易日数据存在 (新筛选需MA60)
 
 
 def _before_market_close() -> bool:

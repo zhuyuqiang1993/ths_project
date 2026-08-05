@@ -44,6 +44,8 @@ MA_SHORT = 20
 MA_LONG = 60
 RPS_WINDOWS = [20, 60]
 MIN_SCORE = 3.0
+MIN_SCORE_FLOOR = 1.5   # 动态阈值下限: 候选为0时逐步降低至此
+SCORE_STEP = 0.25       # 动态阈值步长
 
 _WEIGHTS = {
     "trend": 0.25,
@@ -72,27 +74,33 @@ def load_all_stock_data(days: int = DATA_WINDOW) -> pd.DataFrame:
         WHERE date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
         ORDER BY code, date
     """
-    return _query(sql, (days + 30,))
+    return _query(sql, (days + 45,))
 
 
 def calc_global_rps(all_data: pd.DataFrame, windows: list = RPS_WINDOWS) -> pd.DataFrame:
-    """计算全市场 RPS
+    """计算全市场 RPS (每股每日期的相对强度百分位)
 
-    返回 DataFrame: index=date, columns=codes, 每个窗口一个 RPS 列
+    返回 DataFrame: columns=[date, code, rps_20, rps_60]
     """
-    # 透视: index=date, columns=code, values=close
     close_pivot = all_data.pivot_table(index="date", columns="code", values="close")
     close_pivot = close_pivot.sort_index()
 
-    rps_all = pd.DataFrame(index=close_pivot.index)
+    frames = []
     for w in windows:
         if len(close_pivot) < w + 1:
-            rps_all[f"rps_{w}"] = pd.Series(50.0, index=close_pivot.index)
-            continue
-        returns = close_pivot.pct_change(w)
-        rps_all[f"rps_{w}"] = returns.rank(axis=1, pct=True).mean(axis=1) * 100
+            rps = pd.DataFrame(50.0, index=close_pivot.index, columns=close_pivot.columns)
+        else:
+            returns = close_pivot.pct_change(w)
+            rps = returns.rank(axis=1, pct=True) * 100
+        frame = rps.reset_index().melt(
+            id_vars="date", var_name="code", value_name=f"rps_{w}"
+        )
+        frames.append(frame)
 
-    return rps_all
+    out = frames[0]
+    for f in frames[1:]:
+        out = out.merge(f, on=["date", "code"])
+    return out
 
 
 def _score_one_stock(grp: pd.DataFrame, rps_row: pd.Series,
@@ -147,13 +155,20 @@ def _score_one_stock(grp: pd.DataFrame, rps_row: pd.Series,
         elif vol_total > 0 and vol_price_ok / vol_total >= 0.4:
             volume_score = 0.5
 
-    # === MACD 分 (0-1) ===
+    # === MACD 分 (0-1), 直接用收盘价重算 (DB中signal/hist字段残缺) ===
     macd_score = 0.0
-    if n >= 2:
-        macd_val = grp["macd"].iloc[-1] if pd.notna(grp["macd"].iloc[-1]) else 0
-        signal_val = grp["macd_signal"].iloc[-1] if pd.notna(grp["macd_signal"].iloc[-1]) else 0
-        hist_val = grp["macd_hist"].iloc[-1] if pd.notna(grp["macd_hist"].iloc[-1]) else 0
-        hist_prev = grp["macd_hist"].iloc[-2] if pd.notna(grp["macd_hist"].iloc[-2]) else 0
+    if n >= 26:
+        close_s = grp["close"].astype(float)
+        e12 = close_s.ewm(span=12, adjust=False).mean()
+        e26 = close_s.ewm(span=26, adjust=False).mean()
+        dif = e12 - e26
+        dea = dif.ewm(span=9, adjust=False).mean()
+        hist = dif - dea
+
+        macd_val = dif.iloc[-1]
+        signal_val = dea.iloc[-1]
+        hist_val = hist.iloc[-1]
+        hist_prev = hist.iloc[-2]
 
         if macd_val > signal_val:
             macd_score += 0.3
@@ -165,7 +180,7 @@ def _score_one_stock(grp: pd.DataFrame, rps_row: pd.Series,
     # === 板块分 (0-1) ===
     sector_score_norm = min(sector_score / 5.0, 1.0) if sector_score else 0
 
-    total = (
+    total = 5 * (
         trend_score * _WEIGHTS["trend"]
         + momentum_score * _WEIGHTS["momentum"]
         + volume_score * _WEIGHTS["volume"]
@@ -208,6 +223,7 @@ def screen_stocks(identified_date: str = "") -> pd.DataFrame:
 
     logger.info("计算全市场 RPS...")
     rps_all = calc_global_rps(all_data)
+    rps_lookup = rps_all.set_index(["date", "code"])
 
     sector_scores = _load_sector_scores(identified_at)
 
@@ -227,7 +243,8 @@ def screen_stocks(identified_date: str = "") -> pd.DataFrame:
         date_val = last["date"]
 
         # RPS
-        rps_row = rps_all.loc[date_val] if date_val in rps_all.index else pd.Series(dtype=float)
+        rps_row = rps_lookup.loc[(date_val, code)] \
+            if (date_val, code) in rps_lookup.index else pd.Series(dtype=float)
 
         # 板块得分
         bc = last.get("board_code", "")
@@ -268,8 +285,13 @@ def screen_stocks(identified_date: str = "") -> pd.DataFrame:
 
     result = pd.DataFrame(scores)
     candidates = result[result["score"] >= MIN_SCORE].copy()
+    threshold = MIN_SCORE
+    while candidates.empty and threshold > MIN_SCORE_FLOOR:
+        threshold = round(threshold - SCORE_STEP, 2)
+        candidates = result[result["score"] >= threshold].copy()
+        logger.info(f"候选为0, 阈值降至 {threshold}, 候选 {len(candidates)} 只")
     candidates = candidates.sort_values("score", ascending=False)
-    logger.info(f"评分完成: {len(result)} 只, 候选 {len(candidates)} 只")
+    logger.info(f"评分完成: {len(result)} 只, 候选 {len(candidates)} 只 (阈值 {threshold})")
     return candidates
 
 
