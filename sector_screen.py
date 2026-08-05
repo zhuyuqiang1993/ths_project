@@ -6,7 +6,7 @@
 - 量能 (20%): 5日均量/20日均量 (量能扩张比)
 - 涨跌家数 (10%): 板块内上涨家数 > 下跌家数
 
-候选条件: 综合得分 >= 3 (满分 5)
+候选条件: 综合得分前 10 名 (满分 5)
 """
 
 import sys
@@ -41,6 +41,8 @@ MA_LONG = 60
 VOL_SHORT = 5
 VOL_LONG = 20
 MIN_SCORE = 3           # 候选最低分 (满分5)
+MIN_SCORE_FLOOR = 1.5   # 动态阈值下限
+TARGET_COUNT = 10       # 目标候选板块数量
 
 _WEIGHTS = {"momentum": 0.4, "trend": 0.3, "volume": 0.2, "breadth": 0.1}
 
@@ -176,10 +178,20 @@ def screen_sectors(identified_date: str = "") -> pd.DataFrame:
         + (result["breadth_ok"].astype(float) * 5 * _WEIGHTS["breadth"])
     ).round(2)
 
-    # 筛选候选
-    candidates = result[result["score"] >= MIN_SCORE].copy()
-    candidates = candidates.sort_values("score", ascending=False)
+    # 筛选候选: 分数前 TARGET_COUNT 名 (同分截断至上限)
+    result = result.sort_values("score", ascending=False).reset_index(drop=True)
+    if len(result) <= TARGET_COUNT:
+        candidates = result.copy()
+        threshold = float(result["score"].iloc[-1])
+    else:
+        threshold = float(result["score"].iloc[TARGET_COUNT - 1])
+        if threshold < MIN_SCORE_FLOOR:
+            threshold = MIN_SCORE_FLOOR
+        candidates = result[result["score"] >= threshold].copy()
+        if len(candidates) > TARGET_COUNT:
+            candidates = candidates.head(TARGET_COUNT)
 
+    logger.info(f"板块评分完成: {len(result)} 个, 候选 {len(candidates)} 个 (阈值 {threshold})")
     return candidates
 
 

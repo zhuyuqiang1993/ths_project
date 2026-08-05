@@ -5,7 +5,7 @@
 - 趋势 (30%): 收盘价站上20日均线
 - 量能 (20%): 5日均量/20日均量 (量能扩张比)
 
-候选条件: 综合得分 >= 3.0 (满分 4.5)
+候选条件: 综合得分前 5 名 (满分 5)
 """
 
 import sys
@@ -38,6 +38,8 @@ MA_SHORT = 20
 VOL_SHORT = 5
 VOL_LONG = 20
 MIN_SCORE = 3.0
+MIN_SCORE_FLOOR = 1.5   # 动态阈值下限
+TARGET_COUNT = 5        # 目标候选ETF数量
 
 _WEIGHTS = {"momentum": 0.40, "trend": 0.30, "volume": 0.20}
 
@@ -157,8 +159,20 @@ def screen_etfs(identified_date: str = "") -> pd.DataFrame:
         + (result["vol_expanding"].astype(float) * 5 * _WEIGHTS["volume"])
     ).round(2)
 
-    candidates = result[result["score"] >= MIN_SCORE].copy()
-    candidates = candidates.sort_values("score", ascending=False)
+    # 筛选候选: 分数前 TARGET_COUNT 名 (同分截断至上限)
+    result = result.sort_values("score", ascending=False).reset_index(drop=True)
+    if len(result) <= TARGET_COUNT:
+        candidates = result.copy()
+        threshold = float(result["score"].iloc[-1])
+    else:
+        threshold = float(result["score"].iloc[TARGET_COUNT - 1])
+        if threshold < MIN_SCORE_FLOOR:
+            threshold = MIN_SCORE_FLOOR
+        candidates = result[result["score"] >= threshold].copy()
+        if len(candidates) > TARGET_COUNT:
+            candidates = candidates.head(TARGET_COUNT)
+
+    logger.info(f"ETF评分完成: {len(result)} 只, 候选 {len(candidates)} 只 (阈值 {threshold})")
     return candidates
 
 

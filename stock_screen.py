@@ -7,7 +7,7 @@
 - MACD (15%): 金叉状态, 柱状图为正且增强
 - 板块 (10%): 所在板块评分 >= 3
 
-候选条件: 综合得分 >= 3.0 (满分 5)
+候选条件: 综合得分前 20 名 (满分 5)
 """
 
 import sys
@@ -44,8 +44,10 @@ MA_SHORT = 20
 MA_LONG = 60
 RPS_WINDOWS = [20, 60]
 MIN_SCORE = 3.0
-MIN_SCORE_FLOOR = 1.5   # 动态阈值下限: 候选为0时逐步降低至此
+MIN_SCORE_FLOOR = 1.5   # 动态阈值下限
 SCORE_STEP = 0.25       # 动态阈值步长
+TARGET_COUNT = 20       # 目标候选数量上限
+TARGET_MIN = 15         # 目标候选数量下限 (低于此降低阈值)
 
 _WEIGHTS = {
     "trend": 0.25,
@@ -284,13 +286,24 @@ def screen_stocks(identified_date: str = "") -> pd.DataFrame:
         return pd.DataFrame()
 
     result = pd.DataFrame(scores)
-    candidates = result[result["score"] >= MIN_SCORE].copy()
+    result = result.sort_values("score", ascending=False).reset_index(drop=True)
+
+    # 动态阈值: 取分数前 TARGET_COUNT 名作为候选 (同分截断至上限)
+    if result.empty:
+        logger.info(f"评分完成: 0 只")
+        return result
     threshold = MIN_SCORE
-    while candidates.empty and threshold > MIN_SCORE_FLOOR:
-        threshold = round(threshold - SCORE_STEP, 2)
+    if len(result) <= TARGET_COUNT:
+        candidates = result.copy()
+        threshold = float(result["score"].iloc[-1])
+    else:
+        threshold = float(result["score"].iloc[TARGET_COUNT - 1])
+        if threshold < MIN_SCORE_FLOOR:
+            threshold = MIN_SCORE_FLOOR
         candidates = result[result["score"] >= threshold].copy()
-        logger.info(f"候选为0, 阈值降至 {threshold}, 候选 {len(candidates)} 只")
-    candidates = candidates.sort_values("score", ascending=False)
+        if len(candidates) > TARGET_COUNT:
+            candidates = candidates.head(TARGET_COUNT)
+
     logger.info(f"评分完成: {len(result)} 只, 候选 {len(candidates)} 只 (阈值 {threshold})")
     return candidates
 
