@@ -125,11 +125,15 @@ def build_market_sentiment() -> str:
     for k in ("HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(k, None)
     try:
-        from market_overview import fetch_indices, fetch_sector_performance, build_prompt
+        from market_overview import (fetch_indices, fetch_sector_performance,
+                                     fetch_global_indices, build_prompt, verify_report)
         index_data = fetch_indices()
+        global_indices = fetch_global_indices()
         sector_data = fetch_sector_performance()
-        prompt = build_prompt(index_data, sector_data)
+        prompt = build_prompt(index_data, sector_data, global_indices)
         report = _call_deepseek(prompt)
+        if report:
+            report = verify_report(report, index_data, global_indices)
     except Exception as e:
         logger.error(f"市场情绪报告生成失败: {e}")
         report = None
