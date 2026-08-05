@@ -162,6 +162,13 @@ def build_ths_sector_daily(
 def run(start_date: str = "", end_date: str = "", max_boards: int = 0):
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
 
+    # 增量优化: 检查DB中是否已有目标日期范围的数据, 有则跳过API调用
+    if start_date and end_date:
+        from db_handler import has_data_in_range
+        if has_data_in_range("sector_daily", start_date, end_date):
+            logger.info("sector_daily 数据已存在, 跳过API拉取")
+            return pd.DataFrame()
+
     boards = get_ths_boards()
     logger.info(f"共 {len(boards)} 个同花顺行业板块")
 

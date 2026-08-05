@@ -158,43 +158,55 @@ def _latest_identified_at(table: str) -> str:
 
 
 def build_candidate_stock() -> str:
-    """候选个股: 从 candidate_stock 按标签分组展示最新识别结果"""
+    """候选个股: 从 candidate_stock 展示最新多因子评分结果"""
     latest = _latest_identified_at("candidate_stock")
     if not latest:
         return _section(FEATURE_STOCK, "无数据")
 
     df = _query(
-        """SELECT code, name, board_name, tag, pct_chg, macd, chg_5d, avg_rel
+        """SELECT code, name, board_name, tag, open, close, pct_chg,
+                  chg_5d, score, rps_20, rps_60, trend, momentum,
+                  volume_score, macd_score, sector_score
            FROM candidate_stock WHERE identified_at = %s
-           ORDER BY FIELD(tag,'strict','strong','vol_price'), avg_rel DESC""",
+           ORDER BY score DESC""",
         (latest,),
     )
     if df.empty:
         return _section(FEATURE_STOCK, f"识别日期 {latest} 无候选个股")
 
-    blocks = []
-    for tag in ["strict", "strong", "vol_price"]:
-        sub = df[df["tag"] == tag]
-        if sub.empty:
-            continue
-        rows = "".join(
-            f"<tr><td>{_n(r['code'])}</td><td>{_n(r['name'])}</td>"
-            f"<td>{_n(r['board_name']) or ''}</td>"
-            f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
-            f"<td>{_n(r['chg_5d']) or ''}%</td>"
-            f"<td>{_n(r['macd']) or ''}</td></tr>"
-            for _, r in sub.iterrows()
-        )
-        blocks.append(f"""
-        <p><b>{TAG_NAMES[tag]} ({len(sub)})</b></p>
-        <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse">
-          <tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>板块</td>
-              <td>当日涨幅</td><td>5日涨幅</td><td>MACD</td></tr>
-          {rows}
-        </table>
-        """)
+    def _fmt_score(v):
+        if v is None or pd.isna(v):
+            return ""
+        return f"{float(v):.1f}"
 
-    html = f"<p>识别日期: <b>{latest}</b> (共 {len(df)} 条)</p>" + "".join(blocks)
+    rows = "".join(
+        f"<tr><td>{_n(r['code'])}</td><td>{_n(r['name'])}</td>"
+        f"<td>{_n(r['board_name']) or ''}</td>"
+        f"<td>{_n(r['open']) or ''}</td>"
+        f"<td>{_n(r['close']) or ''}</td>"
+        f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
+        f"<td>{_fmt_score(r['score'])}</td>"
+        f"<td>{_fmt_score(r['rps_20'])}</td>"
+        f"<td>{_fmt_score(r['rps_60'])}</td>"
+        f"<td>{_fmt_score(r['trend'])}</td>"
+        f"<td>{_fmt_score(r['momentum'])}</td>"
+        f"<td>{_fmt_score(r['volume_score'])}</td>"
+        f"<td>{_fmt_score(r['macd_score'])}</td>"
+        f"<td>{_fmt_score(r['sector_score'])}</td></tr>"
+        for _, r in df.iterrows()
+    )
+    html_block = f"""
+    <p><b>全部候选 ({len(df)})</b></p>
+    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse">
+      <tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>板块</td>
+          <td>开盘</td><td>收盘</td><td>涨幅</td><td>总分</td>
+          <td>RPS20</td><td>RPS60</td><td>趋势</td><td>动量</td>
+          <td>量价</td><td>MACD</td><td>板块</td></tr>
+      {rows}
+    </table>
+    """
+
+    html = f"<p>识别日期: <b>{latest}</b> (共 {len(df)} 条)</p>" + html_block
     return _section(FEATURE_STOCK, html)
 
 

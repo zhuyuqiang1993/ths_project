@@ -272,6 +272,13 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
 
     is_today = len(target_dates) == 1 and target_dates[0] == TODAY
 
+    # 增量优化: 非当日数据, 检查DB中是否已有目标日期范围的数据, 有则跳过API调用
+    if not is_today:
+        from db_handler import has_data_in_range
+        if has_data_in_range("stock_daily", target_dates[0], target_dates[-1]):
+            logger.info("stock_daily 数据已存在, 跳过API拉取")
+            return pd.DataFrame()
+
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("===== A股日级数据采集开始 =====")
@@ -324,6 +331,9 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
                     "board_name": board_map.get(c, {}).get("board_name", ""),
                     "prev_close": q["prev_close"],
                     "open": q["open"],
+                    "high": q["high"],
+                    "low": q["low"],
+                    "close": q["price"],
                     "pct_chg": q["pct_chg"],
                     "volume": q["volume"],
                     "amount": q["amount"],
@@ -353,7 +363,7 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
     result = pd.DataFrame(all_rows)
     output_cols = [
         "date", "code", "name", "board_code", "board_name",
-        "prev_close", "open", "pct_chg",
+        "prev_close", "open", "high", "low", "close", "pct_chg",
         "volume", "amount",
         "macd", "macd_signal", "macd_hist",
     ]
@@ -382,4 +392,4 @@ def main():
 
 
 if __name__ == "__main__":
-    run(start_date='2026-01-01',end_date='2026-07-31')
+    run(start_date='2026-06-01',end_date='2026-07-31')

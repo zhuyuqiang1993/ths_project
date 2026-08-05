@@ -1,6 +1,6 @@
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import schedule
 from loguru import logger
@@ -50,30 +50,152 @@ def db_latest_date(table: str) -> str | None:
         return None
 
 
-def _data_is_current(table: str, anchor: str | None) -> bool:
-    """库内最新日期是否已覆盖锚点 (非交易日/无新数据则跳过更新, 幂等)"""
-    if not anchor:
+MARKET_CLOSE = (15, 30)
+SKIP_WINDOW_DAYS = 5     # 近5个交易日数据已存在则跳过更新
+ENSURE_WINDOW_DAYS = 60  # 需要刷新时, 保证近60个交易日数据存在 (新筛选需MA60)
+
+
+def _before_market_close() -> bool:
+    """当前时间是否早于 15:30 (盘中)"""
+    now = datetime.now()
+    return (now.hour, now.minute) < MARKET_CLOSE
+
+
+def _fetch_today_if_missing():
+    """预检: 若当天是交易日且天级表中无当天数据, 先单独拉取当天数据。
+
+    在 run_updates() 的主流程之前调用, 确保当天数据就位后再做完整性判断。
+    盘中会拉到盘中快照数据, 收盘后会拉到完整日线数据。
+    """
+    today_str = date.today().strftime("%Y-%m-%d")
+    try:
+        from trade_calendar import is_trade_date
+        if not is_trade_date(today_str):
+            return
+    except Exception:
+        return
+
+    logger.info(f"[预检] 检测当天({today_str})数据是否就位...")
+
+    steps = [
+        ("个股", "stock_daily", "stock_daily", "YYYY-MM-DD"),
+        ("板块", "sector_daily", "sector_service", "YYYYMMDD"),
+        ("ETF", "etf_daily", "etf_service", "YYYYMMDD"),
+    ]
+    for name, table, module, fmt in steps:
+        # 检查当天是否有数据
+        try:
+            from db_handler import get_connection
+            conn = get_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(f"SELECT COUNT(*) FROM {table} WHERE `date` = %s", (today_str,))
+                count = cur.fetchone()[0]
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"[预检] 查询 {table} 失败: {e}")
+            count = 0
+
+        if count > 0:
+            logger.info(f"[预检] [{name}] {today_str} 数据已存在 ({count}条), 跳过")
+            continue
+
+        # 当天数据不存在, 单独拉取当天
+        logger.info(f"[预检] [{name}] {today_str} 数据缺失, 正在拉取...")
+        try:
+            if fmt == "YYYYMMDD":
+                _import_run(module, start_date=today_str.replace("-", ""),
+                                          end_date=today_str.replace("-", ""))
+            else:
+                _import_run(module, start_date=today_str, end_date=today_str)
+            logger.info(f"[预检] [{name}] {today_str} 拉取完成")
+        except Exception as e:
+            logger.error(f"[预检] [{name}] {today_str} 拉取失败: {e}")
+
+
+def _recent_trade_dates(anchor: str, n: int) -> list:
+    """anchor 往前 n 个交易日 (含 anchor), 按升序返回"""
+    from trade_calendar import get_trade_dates
+    d = datetime.strptime(anchor, "%Y-%m-%d")
+    lookback_start = (d - timedelta(days=n * 3 + 15)).strftime("%Y-%m-%d")
+    dates = get_trade_dates(lookback_start, anchor)
+    return dates[-n:]
+
+
+def _has_recent_days(table: str, dates: list) -> bool:
+    """表内是否已存在 dates 中全部交易日的记录"""
+    if not dates:
         return False
-    latest = db_latest_date(table)
-    return bool(latest and latest >= anchor)
+    placeholders = ",".join(["%s"] * len(dates))
+    try:
+        from db_handler import get_connection
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT COUNT(DISTINCT `date`) FROM {table} WHERE `date` IN ({placeholders})",
+                tuple(dates),
+            )
+            return cur.fetchone()[0] >= len(dates)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"检查 {table} 近{len(dates)}个交易日数据失败: {e}")
+        return False
 
 
 def run_updates(anchor: str | None):
-    """数据更新: 板块 -> 个股 -> ETF (以最近交易日为锚点, 无新数据自动跳过)"""
-    today = date.today().strftime("%Y-%m-%d")
-    steps = [
-        ("板块", "sector_daily", lambda: _import_run("sector_service"), {}),
-        ("个股", "stock_daily",
-         lambda: _import_run("stock_daily", start_date=today, end_date=today), {}),
-        ("ETF", "etf_daily", lambda: _import_run("etf_service"), {}),
-    ]
-    for name, table, run_fn, _ in steps:
-        if _data_is_current(table, anchor):
-            logger.info(f"[{name}] 数据已是最新 (锚点 {anchor}), 跳过更新")
-            continue
-        logger.info(f"===== [{name}] 数据更新 =====")
+    """数据更新: 板块 -> 个股 -> ETF (增量, 避免全量重拉)。
+
+    - 交易日 15:30 之前: 锚点为上一个已完成交易日, 强制刷新近5个交易日窗口
+    - 收盘后: 先预检当天数据是否缺失, 缺则补拉; 再做完整性判断和增量更新
+    """
+    today_str = date.today().strftime("%Y-%m-%d")
+    try:
+        from trade_calendar import is_trade_date, get_trade_dates
+        is_today_trade = is_trade_date(today_str)
+    except Exception:
+        is_today_trade = False
+
+    if is_today_trade and _before_market_close():
+        # 盘中: 锚点用上一个已完成交易日 (今天数据不完整, 不宜做锚点)
+        # 不预检今天, 盘中数据不完整, 不需要拉
+        force_refresh = True
         try:
-            run_fn()
+            all_dates = get_trade_dates("2020-01-01", today_str)
+            eff_anchor = all_dates[-2] if len(all_dates) >= 2 else anchor or today_str
+        except Exception:
+            eff_anchor = anchor or today_str
+    else:
+        # 收盘后: 先预检当天数据, 缺则补拉
+        _fetch_today_if_missing()
+        force_refresh = False
+        eff_anchor = anchor or today_str
+
+    if not eff_anchor:
+        logger.warning("无交易日锚点, 跳过数据更新")
+        return
+
+    mode = "盘中(15:30前)-强制拉取当日" if force_refresh else "收盘后-增量检测"
+    logger.info(f"数据更新模式: {mode}, 锚点={eff_anchor}")
+
+    steps = [
+        ("板块", "sector_daily", "sector_service", "YYYYMMDD"),
+        ("个股", "stock_daily", "stock_daily", "YYYY-MM-DD"),
+        ("ETF", "etf_daily", "etf_service", "YYYYMMDD"),
+    ]
+    for name, table, module, fmt in steps:
+        if not force_refresh and _has_recent_days(table, _recent_trade_dates(eff_anchor, SKIP_WINDOW_DAYS)):
+            logger.info(f"[{name}] 近{SKIP_WINDOW_DAYS}个交易日数据已存在 (至 {eff_anchor}), 跳过更新")
+            continue
+        dates = _recent_trade_dates(eff_anchor, ENSURE_WINDOW_DAYS)
+        start, end = dates[0], dates[-1]
+        if fmt == "YYYYMMDD":
+            start, end = start.replace("-", ""), end.replace("-", "")
+        logger.info(f"===== [{name}] 增量更新: {start} ~ {end} =====")
+        try:
+            _import_run(module, start_date=start, end_date=end)
         except Exception as e:
             logger.error(f"{name}更新失败: {e}")
 
@@ -125,19 +247,19 @@ def job():
     logger.info(f"最近交易日锚点: {anchor}")
     run_updates(anchor)
     run_screens()
-    send_daily_email()
+    #send_daily_email()
     logger.info(f"=== 每日定时任务结束 (耗时 {round(time.time() - t0, 1)}s) ===")
 
 
 if __name__ == "__main__":
     run_time = getattr(CONFIG, "daily_run_time", DAILY_RUN_TIME) or DAILY_RUN_TIME
-    schedule.every().day.at(run_time).do(job)
+    #schedule.every().day.at(run_time).do(job)
+    job()
     logger.info(f"每日定时任务已启动, 每日 {run_time} 运行: "
                 f"更新板块/个股/ETF + 板块/股票/ETF筛选 + 发送订阅邮件")
 
     now = datetime.now().strftime("%H:%M")
     logger.info(f"当前时间: {now}")
-
     if len(sys.argv) > 1 and sys.argv[1] == "--now":
         logger.info("立即执行一次完整任务")
         job()

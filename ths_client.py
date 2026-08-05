@@ -237,8 +237,8 @@ def fetch_index_spot(names: Optional[list] = None) -> dict:
     """获取同花顺指数当日行情 (最新/开盘/最高/最低/昨收/成交量/成交额/涨跌幅)。
 
     返回 {name: {price, pct_chg, change, open, high, low, prev_close, ...}}。
-    基于 v6 today.js 实时接口, 字段: 7=开盘 8=最高 9=最低 11=最新/收盘
-    13=成交量 19=成交额 1968584=涨跌幅(%)。
+    基于 v2 realhead 实时接口, 字段: 10=最新 6=昨收 7=开盘 8=最高 9=最低
+    13=成交量 19=成交额 199112=涨跌幅(%)。
     """
     import json
     names = names or list(INDEX_CODE_MAP.keys())
@@ -252,25 +252,25 @@ def fetch_index_spot(names: Optional[list] = None) -> dict:
         if not code:
             continue
         try:
-            r = s.get(f"https://d.10jqka.com.cn/v6/line/{code}/01/today.js",
+            r = s.get(f"https://d.10jqka.com.cn/v2/realhead/{code}/last.js",
                       cookies={"v": v}, timeout=10)
             payload = r.text[r.text.find("{"):]
             payload = payload[:payload.rfind("}") + 1]
             data = json.loads(payload)
             d = next(iter(data.values()))
-            price = float(d.get("11", 0) or 0)
+            price = float(d.get("10", 0) or 0)
             open_ = float(d.get("7", 0) or 0)
             high = float(d.get("8", 0) or 0)
             low = float(d.get("9", 0) or 0)
             volume = float(d.get("13", 0) or 0)
             amount = float(d.get("19", 0) or 0)
-            pct = float(d.get("1968584", 0) or 0)
-            prev_close = round(price / (1 + pct / 100), 2) if pct != -100 and price else 0
+            prev_close = float(d.get("6", 0) or 0)
+            pct = float(d.get("199112", 0) or 0)
             change = round(price - prev_close, 2) if price else 0
             result[name] = {
                 "price": price, "pct_chg": pct, "change": change,
                 "open": open_, "high": high, "low": low, "prev_close": prev_close,
-                "date": d.get("1", ""),
+                "date": d.get("updateTime", "")[:10],
             }
         except Exception:
             continue

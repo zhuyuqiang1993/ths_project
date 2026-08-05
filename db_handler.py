@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS stock_daily (
     board_name varchar(32) DEFAULT '',
     prev_close decimal(12,2) DEFAULT NULL,
     open decimal(12,2) DEFAULT NULL,
+    high decimal(12,2) DEFAULT NULL,
+    low decimal(12,2) DEFAULT NULL,
+    close decimal(12,2) DEFAULT NULL,
     pct_chg decimal(6,2) DEFAULT NULL,
     volume bigint DEFAULT NULL,
     amount decimal(16,2) DEFAULT NULL,
@@ -135,11 +138,14 @@ DDL_CANDIDATE_SECTOR = """
 CREATE TABLE IF NOT EXISTS candidate_sector (
     board_code varchar(10) NOT NULL,
     board_name varchar(32) DEFAULT '',
-    date date NOT NULL COMMENT '交易日(近5日窗口最后一天)',
+    date date NOT NULL COMMENT '交易日',
     identified_at date NOT NULL COMMENT '识别为候选板块的日期',
+    close decimal(12,2) DEFAULT NULL,
+    score decimal(6,2) DEFAULT NULL COMMENT '综合评分(满分5)',
+    ret_20d decimal(8,4) DEFAULT NULL COMMENT '20日收益率%',
+    vol_ratio decimal(6,2) DEFAULT NULL COMMENT '量能扩张比(5日/20日)',
     low decimal(12,2) DEFAULT NULL,
     high decimal(12,2) DEFAULT NULL,
-    close decimal(12,2) DEFAULT NULL,
     prev_close decimal(12,2) DEFAULT NULL,
     volume bigint DEFAULT NULL,
     amount decimal(20,2) DEFAULT NULL,
@@ -162,14 +168,23 @@ CREATE TABLE IF NOT EXISTS candidate_stock (
     name varchar(32) DEFAULT '',
     board_code varchar(10) NOT NULL,
     board_name varchar(32) DEFAULT '',
-    date date NOT NULL COMMENT '交易日(近5日窗口最后一天)',
+    date date NOT NULL COMMENT '交易日',
     identified_at date NOT NULL COMMENT '识别为候选股票的日期',
+    open decimal(12,2) DEFAULT NULL COMMENT '开盘价',
     close decimal(12,2) DEFAULT NULL,
     pct_chg decimal(6,2) DEFAULT NULL,
     macd decimal(10,4) DEFAULT NULL,
     chg_5d decimal(8,4) DEFAULT NULL COMMENT '近5日涨幅%',
     avg_rel decimal(8,4) DEFAULT NULL COMMENT '平均每日跑赢板块幅度(百分点)',
-    tag varchar(16) NOT NULL DEFAULT '' COMMENT 'strict=严格筛选 strong=强于板块 vol_price=量价股票',
+    tag varchar(16) NOT NULL DEFAULT '' COMMENT 'stock=股票筛选',
+    score decimal(6,2) DEFAULT NULL COMMENT '综合评分(满分5)',
+    rps_20 decimal(6,2) DEFAULT NULL COMMENT '20日RPS(相对强度百分位)',
+    rps_60 decimal(6,2) DEFAULT NULL COMMENT '60日RPS(相对强度百分位)',
+    trend decimal(4,2) DEFAULT NULL COMMENT '趋势得分(0-1)',
+    momentum decimal(4,2) DEFAULT NULL COMMENT '动量得分(0-1)',
+    volume_score decimal(4,2) DEFAULT NULL COMMENT '量价得分(0-1)',
+    macd_score decimal(4,2) DEFAULT NULL COMMENT 'MACD得分(0-1)',
+    sector_score decimal(4,2) DEFAULT NULL COMMENT '板块得分(0-1)',
     created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (code, identified_at, tag)
@@ -181,9 +196,12 @@ DDL_CANDIDATE_ETF = """
 CREATE TABLE IF NOT EXISTS candidate_etf (
     code varchar(10) NOT NULL,
     name varchar(32) DEFAULT '',
-    date date NOT NULL COMMENT '交易日(近5日窗口最后一天)',
+    date date NOT NULL COMMENT '交易日',
     identified_at date NOT NULL COMMENT '识别为候选ETF的日期',
     close decimal(12,2) DEFAULT NULL,
+    score decimal(6,2) DEFAULT NULL COMMENT '综合评分(满分5)',
+    ret_20d decimal(8,4) DEFAULT NULL COMMENT '20日收益率%',
+    vol_ratio decimal(6,2) DEFAULT NULL COMMENT '量能扩张比(5日/20日)',
     prev_close decimal(12,2) DEFAULT NULL,
     pct_chg decimal(8,4) DEFAULT NULL,
     volume bigint DEFAULT NULL,
@@ -253,6 +271,19 @@ def create_tables():
                 logger.info("旧版 stock_daily (id 主键) 已删除，重建新结构")
         cursor.execute(DDL_STOCK_LIST)
         cursor.execute(DDL_STOCK_DAILY)
+        # 兼容旧表: 补 high/low/close 列 (旧 stock_daily 缺当日最高/最低/收盘)
+        cursor.execute(
+            """SELECT COLUMN_NAME FROM information_schema.COLUMNS
+               WHERE TABLE_SCHEMA=%s AND TABLE_NAME='stock_daily'""",
+            (CONFIG.mysql_database,),
+        )
+        existing_cols = {r[0] for r in cursor.fetchall()}
+        for col, ddl in (("high", "ADD COLUMN high decimal(12,2) DEFAULT NULL AFTER open"),
+                         ("low", "ADD COLUMN low decimal(12,2) DEFAULT NULL AFTER high"),
+                         ("close", "ADD COLUMN close decimal(12,2) DEFAULT NULL AFTER low")):
+            if col not in existing_cols:
+                cursor.execute("ALTER TABLE stock_daily " + ddl)
+                logger.info(f"stock_daily 表已补 {col} 列")
         cursor.execute(DDL_SECTOR_DAILY)
         cursor.execute(DDL_ETF_DAILY)
         cursor.execute(DDL_EMAIL_SUBSCRIPTION)
@@ -273,8 +304,49 @@ def create_tables():
         if pk_cols != ["code", "identified_at", "tag"]:
             cursor.execute("ALTER TABLE candidate_stock DROP PRIMARY KEY, ADD PRIMARY KEY (code, identified_at, tag)")
             logger.info(f"candidate_stock 主键已升级: {pk_cols} -> code+identified_at+tag")
+        # 兼容旧表: 若缺 open 列则补列
+        cursor.execute(
+            """SELECT COUNT(*) FROM information_schema.COLUMNS
+               WHERE TABLE_SCHEMA=%s AND TABLE_NAME='candidate_stock' AND COLUMN_NAME='open'""",
+            (CONFIG.mysql_database,),
+        )
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("ALTER TABLE candidate_stock ADD COLUMN open decimal(12,2) DEFAULT NULL COMMENT '开盘价' AFTER identified_at")
+            logger.info("candidate_stock 表已补 open 列")
+        # 兼容旧表: 补 v2 筛选字段
+        for tbl, new_cols in [
+            ("candidate_sector", [
+                ("score", "ADD COLUMN score decimal(6,2) DEFAULT NULL COMMENT '综合评分' AFTER close"),
+                ("ret_20d", "ADD COLUMN ret_20d decimal(8,4) DEFAULT NULL COMMENT '20日收益率%' AFTER score"),
+                ("vol_ratio", "ADD COLUMN vol_ratio decimal(6,2) DEFAULT NULL COMMENT '量能扩张比' AFTER ret_20d"),
+            ]),
+            ("candidate_stock", [
+                ("score", "ADD COLUMN score decimal(6,2) DEFAULT NULL COMMENT '综合评分' AFTER tag"),
+                ("rps_20", "ADD COLUMN rps_20 decimal(6,2) DEFAULT NULL COMMENT '20日RPS' AFTER score"),
+                ("rps_60", "ADD COLUMN rps_60 decimal(6,2) DEFAULT NULL COMMENT '60日RPS' AFTER rps_20"),
+                ("trend", "ADD COLUMN trend decimal(4,2) DEFAULT NULL COMMENT '趋势得分' AFTER rps_60"),
+                ("momentum", "ADD COLUMN momentum decimal(4,2) DEFAULT NULL COMMENT '动量得分' AFTER trend"),
+                ("volume_score", "ADD COLUMN volume_score decimal(4,2) DEFAULT NULL COMMENT '量价得分' AFTER momentum"),
+                ("macd_score", "ADD COLUMN macd_score decimal(4,2) DEFAULT NULL COMMENT 'MACD得分' AFTER volume_score"),
+                ("sector_score", "ADD COLUMN sector_score decimal(4,2) DEFAULT NULL COMMENT '板块得分' AFTER macd_score"),
+            ]),
+            ("candidate_etf", [
+                ("score", "ADD COLUMN score decimal(6,2) DEFAULT NULL COMMENT '综合评分' AFTER close"),
+                ("ret_20d", "ADD COLUMN ret_20d decimal(8,4) DEFAULT NULL COMMENT '20日收益率%' AFTER score"),
+                ("vol_ratio", "ADD COLUMN vol_ratio decimal(6,2) DEFAULT NULL COMMENT '量能扩张比' AFTER ret_20d"),
+            ]),
+        ]:
+            cursor.execute(
+                f"SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=%s AND TABLE_NAME='{tbl}'",
+                (CONFIG.mysql_database,),
+            )
+            existing = {r[0] for r in cursor.fetchall()}
+            for col_name, ddl in new_cols:
+                if col_name not in existing:
+                    cursor.execute(f"ALTER TABLE {tbl} {ddl}")
+                    logger.info(f"{tbl} 表已补 {col_name} 列")
         conn.commit()
-        logger.info("表结构创建完成: stock_list / stock_daily / sector_daily / etf_daily / email_subscription / candidate_sector / candidate_stock")
+        logger.info("表结构创建完成: stock_list / stock_daily / sector_daily / etf_daily / email_subscription / candidate_sector / candidate_stock / candidate_etf")
     except Exception as e:
         conn.rollback()
         raise e
@@ -302,6 +374,51 @@ def init_email_subscription():
     except Exception as e:
         conn.rollback()
         raise e
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def has_data_in_range(table: str, start_date: str, end_date: str,
+                      date_col: str = "date") -> bool:
+    """检查指定表在日期范围内是否每天都有数据, 用于避免冗余API调用。
+
+    Args:
+        table: 表名 (stock_daily / sector_daily / etf_daily)
+        start_date: 起始日期, 格式 YYYY-MM-DD 或 YYYYMMDD
+        end_date: 结束日期, 格式 YYYY-MM-DD 或 YYYYMMDD
+        date_col: 日期列名, 默认 "date"
+
+    Returns:
+        True = 区间内每天都有数据, 可跳过拉取; False = 有缺失, 需要拉取
+    """
+    s = start_date.replace("-", "")
+    e = end_date.replace("-", "")
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        # 获取区间内的交易日数量
+        from trade_calendar import get_trade_dates
+        trade_dates = get_trade_dates(start_date, end_date)
+        if not trade_dates:
+            return True  # 无交易日, 无需拉取
+        expected = len(trade_dates)
+
+        cursor.execute(
+            f"""SELECT COUNT(DISTINCT `{date_col}`) FROM `{table}`
+                WHERE `{date_col}` BETWEEN %s AND %s""",
+            (s, e),
+        )
+        actual = cursor.fetchone()[0]
+        if actual >= expected:
+            logger.info(f"[{table}] 区间内 {expected} 个交易日数据完整, 可跳过拉取")
+            return True
+        else:
+            logger.info(f"[{table}] 区间内缺失 {expected - actual}/{expected} 个交易日数据, 需要拉取")
+            return False
+    except Exception as e:
+        logger.warning(f"检查 {table} 日期范围数据失败: {e}")
+        return False
     finally:
         cursor.close()
         conn.close()
@@ -363,19 +480,20 @@ def save_stock_list_to_db(df: pd.DataFrame):
 
 def save_stock_daily_to_db(df: pd.DataFrame):
     """写入个股日线 (date/code/name/board_code/board_name/prev_close/open/
-    pct_chg/volume/amount/macd/macd_signal/macd_hist)"""
+    high/low/close/pct_chg/volume/amount/macd/macd_signal/macd_hist)"""
     cols = ["code", "date", "name", "board_code", "board_name",
-            "prev_close", "open", "pct_chg", "volume", "amount",
-            "macd", "macd_signal", "macd_hist"]
+            "prev_close", "open", "high", "low", "close", "pct_chg",
+            "volume", "amount", "macd", "macd_signal", "macd_hist"]
     sql = """INSERT INTO stock_daily
              (code, date, name, board_code, board_name,
-              prev_close, open, pct_chg, volume, amount,
-              macd, macd_signal, macd_hist)
-             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              prev_close, open, high, low, close, pct_chg,
+              volume, amount, macd, macd_signal, macd_hist)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
              ON DUPLICATE KEY UPDATE
              name=VALUES(name), board_code=VALUES(board_code),
              board_name=VALUES(board_name), prev_close=VALUES(prev_close),
-             open=VALUES(open), pct_chg=VALUES(pct_chg), volume=VALUES(volume),
+             open=VALUES(open), high=VALUES(high), low=VALUES(low),
+             close=VALUES(close), pct_chg=VALUES(pct_chg), volume=VALUES(volume),
              amount=VALUES(amount), macd=VALUES(macd),
              macd_signal=VALUES(macd_signal), macd_hist=VALUES(macd_hist)"""
     _write_df(df, sql, cols, "stock_daily")
@@ -419,21 +537,23 @@ def save_etf_daily_to_db(df: pd.DataFrame):
 
 
 def save_candidate_sector_to_db(df: pd.DataFrame):
-    """写入候选板块 (board_code/board_name/date/identified_at/low/high/close/
-    prev_close/volume/amount/pct_chg/change/advance/decline/net_inflow/chg_5d)"""
+    """写入候选板块"""
     cols = ["board_code", "board_name", "date", "identified_at",
-            "low", "high", "close", "prev_close", "volume", "amount",
+            "close", "score", "ret_20d", "vol_ratio",
+            "low", "high", "prev_close", "volume", "amount",
             "pct_chg", "change", "advance", "decline", "net_inflow", "chg_5d"]
     sql = """INSERT INTO candidate_sector
              (board_code, board_name, date, identified_at,
-              low, high, close, prev_close, volume, amount,
+              close, score, ret_20d, vol_ratio,
+              low, high, prev_close, volume, amount,
               pct_chg, `change`, advance, decline, net_inflow, chg_5d)
-             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
              ON DUPLICATE KEY UPDATE
              board_name=VALUES(board_name), date=VALUES(date),
-             low=VALUES(low), high=VALUES(high), close=VALUES(close),
-             prev_close=VALUES(prev_close), volume=VALUES(volume),
-             amount=VALUES(amount), pct_chg=VALUES(pct_chg),
+             close=VALUES(close), score=VALUES(score), ret_20d=VALUES(ret_20d),
+             vol_ratio=VALUES(vol_ratio),
+             low=VALUES(low), high=VALUES(high), prev_close=VALUES(prev_close),
+             volume=VALUES(volume), amount=VALUES(amount), pct_chg=VALUES(pct_chg),
              `change`=VALUES(`change`), advance=VALUES(advance),
              decline=VALUES(decline), net_inflow=VALUES(net_inflow),
              chg_5d=VALUES(chg_5d)"""
@@ -454,22 +574,28 @@ def delete_candidate_stock_by_date(identified_at):
 
 
 def save_candidate_stock_to_db(df: pd.DataFrame, replace_date: bool = False):
-    """写入候选股票 (code/name/board_code/board_name/date/identified_at/
-    close/pct_chg/macd/chg_5d/avg_rel/tag); replace_date=True 时先删同日旧记录"""
+    """写入候选股票; replace_date=True 时先删同日旧记录"""
     if replace_date:
         delete_candidate_stock_by_date(df["identified_at"].iloc[0])
     cols = ["code", "name", "board_code", "board_name", "date", "identified_at",
-            "close", "pct_chg", "macd", "chg_5d", "avg_rel", "tag"]
+            "open", "close", "pct_chg", "macd", "chg_5d", "avg_rel", "tag",
+            "score", "rps_20", "rps_60", "trend", "momentum",
+            "volume_score", "macd_score", "sector_score"]
     sql = """INSERT INTO candidate_stock
              (code, name, board_code, board_name, date, identified_at,
-              close, pct_chg, macd, chg_5d, avg_rel, tag)
-             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              open, close, pct_chg, macd, chg_5d, avg_rel, tag,
+              score, rps_20, rps_60, trend, momentum,
+              volume_score, macd_score, sector_score)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
              ON DUPLICATE KEY UPDATE
              name=VALUES(name), board_code=VALUES(board_code),
              board_name=VALUES(board_name), date=VALUES(date),
-             close=VALUES(close), pct_chg=VALUES(pct_chg),
+             open=VALUES(open), close=VALUES(close), pct_chg=VALUES(pct_chg),
              macd=VALUES(macd), chg_5d=VALUES(chg_5d), avg_rel=VALUES(avg_rel),
-             tag=VALUES(tag)"""
+             tag=VALUES(tag), score=VALUES(score), rps_20=VALUES(rps_20),
+             rps_60=VALUES(rps_60), trend=VALUES(trend), momentum=VALUES(momentum),
+             volume_score=VALUES(volume_score), macd_score=VALUES(macd_score),
+             sector_score=VALUES(sector_score)"""
     _write_df(df, sql, cols, "candidate_stock")
 
 
@@ -487,21 +613,23 @@ def delete_candidate_etf_by_date(identified_at):
 
 
 def save_candidate_etf_to_db(df: pd.DataFrame, replace_date: bool = False):
-    """写入候选ETF (code/name/date/identified_at/close/prev_close/
-    pct_chg/volume/amount/chg_5d); replace_date=True 时先删同日旧记录"""
+    """写入候选ETF; replace_date=True 时先删同日旧记录"""
     if replace_date:
         delete_candidate_etf_by_date(df["identified_at"].iloc[0])
     cols = ["code", "name", "date", "identified_at",
-            "close", "prev_close", "pct_chg", "volume", "amount", "chg_5d"]
+            "close", "score", "ret_20d", "vol_ratio",
+            "prev_close", "pct_chg", "volume", "amount", "chg_5d"]
     sql = """INSERT INTO candidate_etf
              (code, name, date, identified_at,
-              close, prev_close, pct_chg, volume, amount, chg_5d)
-             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              close, score, ret_20d, vol_ratio,
+              prev_close, pct_chg, volume, amount, chg_5d)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
              ON DUPLICATE KEY UPDATE
              name=VALUES(name), date=VALUES(date),
-             close=VALUES(close), prev_close=VALUES(prev_close),
-             pct_chg=VALUES(pct_chg), volume=VALUES(volume),
-             amount=VALUES(amount), chg_5d=VALUES(chg_5d)"""
+             close=VALUES(close), score=VALUES(score), ret_20d=VALUES(ret_20d),
+             vol_ratio=VALUES(vol_ratio),
+             prev_close=VALUES(prev_close), pct_chg=VALUES(pct_chg),
+             volume=VALUES(volume), amount=VALUES(amount), chg_5d=VALUES(chg_5d)"""
     _write_df(df, sql, cols, "candidate_etf")
 
 
