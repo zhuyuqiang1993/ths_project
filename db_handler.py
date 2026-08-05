@@ -537,7 +537,7 @@ def save_etf_daily_to_db(df: pd.DataFrame):
 
 
 def save_candidate_sector_to_db(df: pd.DataFrame):
-    """写入候选板块"""
+    """写入候选板块 (每次清空全表, 只保留最新一批候选)"""
     cols = ["board_code", "board_name", "date", "identified_at",
             "close", "score", "ret_20d", "vol_ratio",
             "low", "high", "prev_close", "volume", "amount",
@@ -557,26 +557,11 @@ def save_candidate_sector_to_db(df: pd.DataFrame):
              `change`=VALUES(`change`), advance=VALUES(advance),
              decline=VALUES(decline), net_inflow=VALUES(net_inflow),
              chg_5d=VALUES(chg_5d)"""
-    _write_df(df, sql, cols, "candidate_sector")
-
-
-def delete_candidate_stock_by_date(identified_at):
-    """删除指定识别日期的候选股票, 保证同一天重复筛选幂等"""
-    conn = get_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM candidate_stock WHERE identified_at = %s", (identified_at,))
-        conn.commit()
-        logger.info(f"已删除 candidate_stock identified_at={identified_at} 记录 {cur.rowcount} 条")
-        cur.close()
-    finally:
-        conn.close()
+    _write_df(df, sql, cols, "candidate_sector", clear_before=True)
 
 
 def save_candidate_stock_to_db(df: pd.DataFrame, replace_date: bool = False):
-    """写入候选股票; replace_date=True 时先删同日旧记录"""
-    if replace_date:
-        delete_candidate_stock_by_date(df["identified_at"].iloc[0])
+    """写入候选股票 (每次清空全表, 只保留最新一批候选)"""
     cols = ["code", "name", "board_code", "board_name", "date", "identified_at",
             "open", "close", "pct_chg", "macd", "chg_5d", "avg_rel", "tag",
             "score", "rps_20", "rps_60", "trend", "momentum",
@@ -596,26 +581,11 @@ def save_candidate_stock_to_db(df: pd.DataFrame, replace_date: bool = False):
              rps_60=VALUES(rps_60), trend=VALUES(trend), momentum=VALUES(momentum),
              volume_score=VALUES(volume_score), macd_score=VALUES(macd_score),
              sector_score=VALUES(sector_score)"""
-    _write_df(df, sql, cols, "candidate_stock")
-
-
-def delete_candidate_etf_by_date(identified_at):
-    """删除指定识别日期的候选ETF, 保证同一天重复筛选幂等"""
-    conn = get_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM candidate_etf WHERE identified_at = %s", (identified_at,))
-        conn.commit()
-        logger.info(f"已删除 candidate_etf identified_at={identified_at} 记录 {cur.rowcount} 条")
-        cur.close()
-    finally:
-        conn.close()
+    _write_df(df, sql, cols, "candidate_stock", clear_before=True)
 
 
 def save_candidate_etf_to_db(df: pd.DataFrame, replace_date: bool = False):
-    """写入候选ETF; replace_date=True 时先删同日旧记录"""
-    if replace_date:
-        delete_candidate_etf_by_date(df["identified_at"].iloc[0])
+    """写入候选ETF (每次清空全表, 只保留最新一批候选)"""
     cols = ["code", "name", "date", "identified_at",
             "close", "score", "ret_20d", "vol_ratio",
             "prev_close", "pct_chg", "volume", "amount", "chg_5d"]
@@ -630,16 +600,20 @@ def save_candidate_etf_to_db(df: pd.DataFrame, replace_date: bool = False):
              vol_ratio=VALUES(vol_ratio),
              prev_close=VALUES(prev_close), pct_chg=VALUES(pct_chg),
              volume=VALUES(volume), amount=VALUES(amount), chg_5d=VALUES(chg_5d)"""
-    _write_df(df, sql, cols, "candidate_etf")
+    _write_df(df, sql, cols, "candidate_etf", clear_before=True)
 
 
-def _write_df(df: pd.DataFrame, sql: str, cols: list, table: str):
+def _write_df(df: pd.DataFrame, sql: str, cols: list, table: str,
+              clear_before: bool = False):
     if df is None or df.empty:
         return
     ensure_table(table)
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        if clear_before:
+            cursor.execute(f"DELETE FROM {table}")
+            logger.info(f"{table} 已清空历史数据, 仅保留最新候选")
         total = len(df)
         chunk = 5000
         for i in range(0, total, chunk):

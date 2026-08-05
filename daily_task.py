@@ -163,7 +163,7 @@ def run_updates(anchor: str | None):
         # 不预检今天, 盘中数据不完整, 不需要拉
         force_refresh = True
         try:
-            all_dates = get_trade_dates("2020-01-01", today_str)
+            all_dates = get_trade_dates("2026-01-01", today_str)
             eff_anchor = all_dates[-2] if len(all_dates) >= 2 else anchor or today_str
         except Exception:
             eff_anchor = anchor or today_str
@@ -247,14 +247,13 @@ def job():
     logger.info(f"最近交易日锚点: {anchor}")
     run_updates(anchor)
     run_screens()
-    #send_daily_email()
+    send_daily_email()
     logger.info(f"=== 每日定时任务结束 (耗时 {round(time.time() - t0, 1)}s) ===")
 
 
 if __name__ == "__main__":
     run_time = getattr(CONFIG, "daily_run_time", DAILY_RUN_TIME) or DAILY_RUN_TIME
-    #schedule.every().day.at(run_time).do(job)
-    job()
+    schedule.every().day.at(run_time).do(job)
     logger.info(f"每日定时任务已启动, 每日 {run_time} 运行: "
                 f"更新板块/个股/ETF + 板块/股票/ETF筛选 + 发送订阅邮件")
 
