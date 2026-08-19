@@ -308,26 +308,159 @@ def screen_stocks(identified_date: str = "") -> pd.DataFrame:
     return candidates
 
 
+def _load_sector_daily(days: int = DATA_WINDOW) -> pd.DataFrame:
+    """加载板块最近 N 天日线数据"""
+    sql = """
+        SELECT board_code, board_name, date, amount
+        FROM sector_daily
+        WHERE date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+        ORDER BY board_code, date
+    """
+    return _query(sql, (days + 45,))
+
+
+def screen_volume_candidates(identified_date: str = "") -> pd.DataFrame:
+    """筛选3倍量候选股票: 股票最近成交量增长300%且所属板块成交额增长"""
+    identified_at = identified_date or date.today().isoformat()
+    
+    logger.info("加载股票数据用于3倍量筛选...")
+    stock_data = load_all_stock_data(days=10)  # 只需要最近几天数据
+    if stock_data.empty:
+        logger.warning("stock_daily 无数据")
+        return pd.DataFrame()
+    
+    logger.info("加载板块数据用于3倍量筛选...")
+    sector_data = _load_sector_daily(days=10)
+    if sector_data.empty:
+        logger.warning("sector_daily 无数据")
+        return pd.DataFrame()
+    
+    # 获取最近一个交易日
+    latest_date = stock_data['date'].max()
+    logger.info(f"最近交易日: {latest_date}")
+    
+    # 计算股票成交量增长率
+    # 先按股票分组，按日期排序，计算相邻两天的成交量增长率
+    stock_data = stock_data.sort_values(['code', 'date'])
+    stock_data['prev_volume'] = stock_data.groupby('code')['volume'].shift(1)
+    # 处理除以零的情况
+    stock_data['volume_growth'] = stock_data.apply(
+        lambda row: (row['volume'] - row['prev_volume']) / row['prev_volume'] 
+        if pd.notna(row['prev_volume']) and row['prev_volume'] > 0 else 0, 
+        axis=1
+    )
+    
+    # 计算板块成交额增长率
+    sector_data = sector_data.sort_values(['board_code', 'date'])
+    sector_data['prev_amount'] = sector_data.groupby('board_code')['amount'].shift(1)
+    # 处理除以零的情况
+    sector_data['amount_growth'] = sector_data.apply(
+        lambda row: (row['amount'] - row['prev_amount']) / row['prev_amount'] 
+        if pd.notna(row['prev_amount']) and row['prev_amount'] > 0 else 0, 
+        axis=1
+    )
+    
+    # 筛选最近一个交易日的股票
+    latest_stocks = stock_data[stock_data['date'] == latest_date].copy()
+    
+    # 筛选股票成交量增长率 >= 3.0 (增长300%)
+    volume_candidates = latest_stocks[latest_stocks['volume_growth'] >= 3.0].copy()
+    
+    if volume_candidates.empty:
+        logger.info("无股票满足成交量增长300%条件")
+        return pd.DataFrame()
+    
+    # 获取这些股票所属板块在最近一个交易日的成交额增长率
+    volume_candidates = volume_candidates.merge(
+        sector_data[['board_code', 'date', 'amount_growth']],
+        left_on=['board_code', 'date'],
+        right_on=['board_code', 'date'],
+        how='left'
+    )
+    
+    # 筛选板块成交额增长 > 0
+    final_candidates = volume_candidates[volume_candidates['amount_growth'] > 0].copy()
+    
+    if final_candidates.empty:
+        logger.info("无股票满足板块成交额增长条件")
+        return pd.DataFrame()
+    
+    # 构建结果 DataFrame
+    result = pd.DataFrame({
+        'code': final_candidates['code'],
+        'name': final_candidates['name'],
+        'board_code': final_candidates['board_code'],
+        'board_name': final_candidates['board_name'],
+        'date': final_candidates['date'],
+        'identified_at': identified_at,
+        'open': final_candidates.get('open'),
+        'close': final_candidates['close'],
+        'pct_chg': final_candidates.get('pct_chg'),
+        'macd': final_candidates.get('macd'),
+        'chg_5d': 0.0,  # 简化处理
+        'avg_rel': 50.0,  # 简化处理
+        'tag': 'vol_3x',
+        'score': 0.0,  # 无评分
+        'rps_20': 50.0,
+        'rps_60': 50.0,
+        'trend': 0.0,
+        'momentum': 0.0,
+        'volume_score': 0.0,
+        'macd_score': 0.0,
+        'sector_score': 0.0,
+    })
+    
+    logger.info(f"3倍量筛选完成: {len(result)} 只候选股票")
+    return result
+
+
 def run(identified_date: str = ""):
     create_tables()
     identified_at = identified_date or date.today().isoformat()
     logger.info(f"===== 股票筛选开始 (识别日期: {identified_at}) =====")
 
-    df = screen_stocks(identified_date)
-    if df.empty:
+    # 多因子筛选
+    df_multi = screen_stocks(identified_date)
+    
+    # 3倍量筛选
+    df_vol = screen_volume_candidates(identified_date)
+    
+    # 合并结果
+    if df_multi.empty and df_vol.empty:
         logger.warning("===== 股票筛选结束: 无候选 =====")
-        return df
-
+        return pd.DataFrame()
+    
+    if df_multi.empty:
+        df = df_vol
+    elif df_vol.empty:
+        df = df_multi
+    else:
+        df = pd.concat([df_multi, df_vol], ignore_index=True)
+    
+    # 去重（同一股票可能同时满足多因子和3倍量条件，保留多因子结果）
+    df = df.drop_duplicates(subset=['code', 'identified_at'], keep='first')
+    
     save_candidate_stock_to_db(df, replace_date=True)
     logger.info(f"候选股票 {len(df)} 条, 已保存到 candidate_stock")
-
-    top = df.sort_values("score", ascending=False).head(20)
-    for _, r in top.iterrows():
-        logger.info(f"  {r['code']} {r['name']} [{r['board_name']}] "
-                     f"得分={r['score']} RPS20={r['rps_20']:.0f} "
-                     f"RPS60={r['rps_60']:.0f} "
-                     f"趋势={r['trend']} 动量={r['momentum']} "
-                     f"量价={r['volume_score']} MACD={r['macd_score']}")
+    
+    # 打印多因子候选
+    if not df_multi.empty:
+        top = df_multi.sort_values("score", ascending=False).head(20)
+        logger.info("=== 多因子候选 ===")
+        for _, r in top.iterrows():
+            logger.info(f"  {r['code']} {r['name']} [{r['board_name']}] "
+                         f"得分={r['score']} RPS20={r['rps_20']:.0f} "
+                         f"RPS60={r['rps_60']:.0f} "
+                         f"趋势={r['trend']} 动量={r['momentum']} "
+                         f"量价={r['volume_score']} MACD={r['macd_score']}")
+    
+    # 打印3倍量候选
+    if not df_vol.empty:
+        logger.info("=== 3倍量候选 ===")
+        for _, r in df_vol.iterrows():
+            logger.info(f"  {r['code']} {r['name']} [{r['board_name']}] "
+                         f"成交量增长300%+ 板块成交额增长")
+    
     return df
 
 
