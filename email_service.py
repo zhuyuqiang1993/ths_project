@@ -358,7 +358,7 @@ def build_candidate_etf() -> str:
 
 
 def build_volrise() -> str:
-    """量增价涨筛选: 近3日量环比>0 且涨幅>0 的板块/股票"""
+    """量增价涨筛选: 板块需近3日每日涨幅>0且量环比>=-20%; 个股需近3日每日涨幅>0且板块涨幅>0(不做量环比)"""
     latest_s = _latest_identified_at("candidate_sector_volrise")
     latest_t = _latest_identified_at("candidate_stock_volrise")
     if not latest_s and not latest_t:
@@ -432,8 +432,8 @@ def build_volrise() -> str:
         return _section(FEATURE_VOLRISE, f"识别日期 {latest} 无量增价涨候选")
 
     html = (
-        f"<p>识别日期: <b>{latest}</b> (最近3个交易日每天都满足: 涨幅>0, 量环比>=-5%; "
-        "个股需其所在板块当日涨幅>0)</p>" + "".join(parts)
+        f"<p>识别日期: <b>{latest}</b> (板块: 近3日每天涨幅>0且量环比>=-20%; "
+        "个股: 近3日每天涨幅>0且板块涨幅>0，不做量环比)</p>" + "".join(parts)
     )
     return _section(FEATURE_VOLRISE, html)
 

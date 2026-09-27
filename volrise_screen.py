@@ -6,16 +6,18 @@
 候选板块 —— 扫描A股所有板块 (行业 sector_daily + 概念 concept_daily):
     最近3个交易日 **每一天都同时满足** (3/3 连续):
         板块当日涨幅 > 0          (pct_chg[d] > 0)
-        且成交量天级环比 >= -5%   (volume[d]/volume[d-1]-1 >= -5%)
+        且成交量天级环比 >= -20%  (volume[d]/volume[d-1]-1 >= -20%)
 
 候选股票 —— 扫描全部个股:
     最近3个交易日 **每一天都同时满足** (3/3 连续):
         该股当日涨幅 > 0          (pct_chg[d] > 0)
-        且该股成交量天级环比 >= -5%
         且同日所属行业板块涨幅 > 0
+        (不做每日量环比要求)
 
 说明
-- 涨幅必须每天都为正; 量允许小幅缩量 (环比 >= -5%) 但不得大幅缩量
+- 涨幅必须每天都为正
+- 板块量允许缩量 (环比 >= -20%)
+- 个股不做每日量环比要求
 - 环比基准取该证券自身分组内的上一交易行
 - 窗口 = 全局最近3个交易日; 任一天缺数据 (停牌) 或不满足即落选
 - hit_days = 窗口内满足天数 (入选者恒为3); 输出行情字段取窗口末交易日当日值
@@ -60,7 +62,7 @@ logger.add(
 )
 
 WINDOW_DAYS = 3       # 命中窗口: 最近3个交易日, 须每天全部满足
-VOL_RING_MIN = -5.0   # 量环比下限: 每日成交量环比 >= -5% (允许小幅缩量)
+VOL_RING_MIN = -20.0  # 板块量环比下限: 每日成交量环比 >= -20% (允许缩量)
 LOAD_DAYS = 25        # 加载缓冲 (自然日, 覆盖窗口+环比基准+3日涨幅回看)
 TOP_SECTOR = 15
 TOP_STOCK = 20
@@ -141,10 +143,10 @@ def load_sector_pcts(anchor: str) -> dict:
             for _, r in df.iterrows()}
 
 
-def _window_daily(grp: pd.DataFrame, wset: set, extra_ok=None):
+def _window_daily(grp: pd.DataFrame, wset: set, extra_ok=None, check_volume=True):
     """窗口内逐日判定 (须每天全部满足才入选)
 
-    每日满足 = 量环比 >= VOL_RING_MIN(-5%) 且 extra_ok(i) 为真
+    每日满足 = (check_volume 时需量环比 >= VOL_RING_MIN(-20%)) 且 extra_ok(i) 为真
     extra_ok(i) -> bool 附加条件 (涨幅>0等); 缺数据/停牌日直接判 False
     返回 (daily: {date: bool}, idx: {date: 行号})
     """
@@ -157,8 +159,10 @@ def _window_daily(grp: pd.DataFrame, wset: set, extra_ok=None):
         if i is None or i < 1 or not vols[i - 1]:
             daily[d] = False
             continue
-        ring = (vols[i] / vols[i - 1] - 1) * 100
-        ok = bool(ring >= VOL_RING_MIN)
+        ok = True
+        if check_volume:
+            ring = (vols[i] / vols[i - 1] - 1) * 100
+            ok = bool(ring >= VOL_RING_MIN)
         if ok and extra_ok is not None:
             ok = bool(extra_ok(i))
         daily[d] = ok
@@ -176,7 +180,7 @@ def _ret_3d(grp: pd.DataFrame, i: int):
 
 
 def scan_sectors(board_df: pd.DataFrame, window_dates: list) -> pd.DataFrame:
-    """候选板块: 窗口3日每天 涨幅>0 且 量环比>=-5% (3/3)"""
+    """候选板块: 窗口3日每天 涨幅>0 且 量环比>=-20% (3/3)"""
     if board_df.empty:
         return pd.DataFrame()
     wset = set(window_dates)
@@ -190,7 +194,7 @@ def scan_sectors(board_df: pd.DataFrame, window_dates: list) -> pd.DataFrame:
             pct = _f(grp["pct_chg"].iloc[i])
             return pct is not None and pct > 0
 
-        daily, idx = _window_daily(grp, wset, extra_ok=_board_ok)
+        daily, idx = _window_daily(grp, wset, extra_ok=_board_ok, check_volume=True)
         if len(daily) < WINDOW_DAYS or not all(daily.values()):
             continue
         i = idx[max(daily)]
@@ -216,7 +220,7 @@ def scan_sectors(board_df: pd.DataFrame, window_dates: list) -> pd.DataFrame:
 
 def scan_stocks(stock_df: pd.DataFrame, window_dates: list,
                 sector_pcts: dict) -> pd.DataFrame:
-    """候选股票: 窗口3日每天 个股涨幅>0 且 量环比>=-5% 且 板块涨幅>0 (3/3)"""
+    """候选股票: 窗口3日每天 个股涨幅>0 且 板块涨幅>0 (3/3) — 不做每日量环比要求"""
     if stock_df.empty:
         return pd.DataFrame()
     wset = set(window_dates)
@@ -236,7 +240,7 @@ def scan_stocks(stock_df: pd.DataFrame, window_dates: list,
             sp = sector_pcts.get((bc, grp["date"].iloc[i]))
             return sp is not None and sp > 0
 
-        daily, idx = _window_daily(grp, wset, extra_ok=_day_ok)
+        daily, idx = _window_daily(grp, wset, extra_ok=_day_ok, check_volume=False)
         if len(daily) < WINDOW_DAYS or not all(daily.values()):
             continue
         i = idx[max(daily)]
@@ -341,7 +345,7 @@ def run(identified_at: str = ""):
         save_candidate_sector_volrise(sdf)
     logger.info(f"候选板块 {len(sdf)} 个, 已保存到 candidate_sector_volrise")
 
-    logger.info("扫描全部个股 (每日: 个股涨幅>0 且 量环比>=-5% 且 板块涨幅>0)...")
+    logger.info("扫描全部个股 (每日: 个股涨幅>0 且 板块涨幅>0, 不做量环比)...")
     tdf = scan_stocks(load_stocks(anchor), window_dates,
                       load_sector_pcts(anchor))
     if not tdf.empty:
