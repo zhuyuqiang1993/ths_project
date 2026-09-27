@@ -20,7 +20,7 @@ logger.add(
     level="DEBUG",
 )
 
-DAILY_RUN_TIME = "17:00"
+DAILY_RUN_TIME = "08:45"
 
 
 def latest_trade_date() -> str | None:
@@ -81,6 +81,7 @@ def _fetch_today_if_missing():
         ("个股", "stock_daily", "stock_daily", "YYYY-MM-DD"),
         ("板块", "sector_daily", "sector_service", "YYYYMMDD"),
         ("ETF", "etf_daily", "etf_service", "YYYYMMDD"),
+        ("指数", "index_daily", "index_daily", "YYYYMMDD"),
     ]
     for name, table, module, fmt in steps:
         # 检查当天是否有数据
@@ -184,6 +185,7 @@ def run_updates(anchor: str | None):
         ("板块", "sector_daily", "sector_service", "YYYYMMDD"),
         ("个股", "stock_daily", "stock_daily", "YYYY-MM-DD"),
         ("ETF", "etf_daily", "etf_service", "YYYYMMDD"),
+        ("指数", "index_daily", "index_daily", "YYYYMMDD"),
     ]
     for name, table, module, fmt in steps:
         if not force_refresh and _has_recent_days(table, _recent_trade_dates(eff_anchor, SKIP_WINDOW_DAYS)):
@@ -199,6 +201,48 @@ def run_updates(anchor: str | None):
         except Exception as e:
             logger.error(f"{name}更新失败: {e}")
 
+    # 收盘后: 个股资金流/估值快照 (东财) + 板块涨跌家数/资金流入回填
+    if not force_refresh:
+        _capture_market_stats(eff_anchor)
+
+
+def _capture_market_stats(anchor: str):
+    """收盘后数据快照: 个股主力资金流 + 个股估值 + 板块统计回填。
+
+    - stock_moneyflow: 东财 clist 资金流排行 (约2个请求)
+    - stock_list: 东财估值快照 PE/PB/市值/换手 (约2个请求)
+    - sector_daily advance/decline/net_inflow: 由上述数据聚合回填
+    """
+    logger.info(f"===== [E] 市场统计快照 (锚点 {anchor}) =====")
+    try:
+        from eastmoney_client import fetch_stock_moneyflow_rank, fetch_stock_valuation
+        from db_handler import save_stock_moneyflow_to_db, save_stock_list_to_db
+        df_mf = fetch_stock_moneyflow_rank()
+        if df_mf is not None and not df_mf.empty:
+            df_mf["date"] = anchor
+            save_stock_moneyflow_to_db(df_mf)
+            logger.info(f"个股资金流快照: {len(df_mf)} 只 @ {anchor}")
+        else:
+            logger.warning("个股资金流排行无数据 (东财不可用?)")
+        df_val = fetch_stock_valuation()
+        if df_val is not None and not df_val.empty:
+            save_stock_list_to_db(df_val)
+            logger.info(f"个股估值快照: {len(df_val)} 只")
+    except Exception as e:
+        logger.error(f"资金流/估值快照失败: {e}")
+
+    try:
+        from trade_calendar import get_trade_dates
+        from sector_service import refresh_sector_stats
+        dates = get_trade_dates(
+            (datetime.strptime(anchor, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d"),
+            anchor,
+        )
+        if dates:
+            refresh_sector_stats(dates[0], dates[-1])
+    except Exception as e:
+        logger.error(f"板块统计回填失败: {e}")
+
 
 def _import_run(module: str, **kwargs):
     import importlib
@@ -207,7 +251,7 @@ def _import_run(module: str, **kwargs):
 
 
 def run_screens():
-    """筛选: 板块 -> 股票 -> ETF"""
+    """筛选与分析: 板块 -> 股票 -> ETF -> 量价分析 -> 量增价涨"""
     logger.info("===== [A] 板块筛选 =====")
     try:
         from sector_screen import run as sector_screen_run
@@ -229,10 +273,24 @@ def run_screens():
     except Exception as e:
         logger.error(f"ETF筛选失败: {e}")
 
+    logger.info("===== [D] 量价分析 =====")
+    try:
+        from volume_price import run as volume_price_run
+        volume_price_run()
+    except Exception as e:
+        logger.error(f"量价分析失败: {e}")
+
+    logger.info("===== [E] 量增价涨筛选 =====")
+    try:
+        from volrise_screen import run as volrise_run
+        volrise_run()
+    except Exception as e:
+        logger.error(f"量增价涨筛选失败: {e}")
+
 
 def send_daily_email():
-    """发送订阅邮件: 市场情绪+候选个股+候选ETF+下个交易日预测结论"""
-    logger.info("===== [D] 发送订阅邮件 =====")
+    """发送订阅邮件: 市场情绪+候选个股+量价分析+量增价涨+候选ETF+下个交易日预测结论"""
+    logger.info("===== [F] 发送订阅邮件 =====")
     try:
         from email_service import run as email_run
         email_run()

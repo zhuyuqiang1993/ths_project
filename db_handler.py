@@ -130,7 +130,7 @@ DEFAULT_EMAIL_SUBSCRIPTION = (
     "zhuyuqiang2015@outlook.com",
     "2026-01-01",
     9999999,
-    "market_sentiment,sector_screen,stock_screen,etf_screen",
+    "market_sentiment,sector_screen,stock_screen,volume_price,volrise_screen,etf_screen",
 )
 
 
@@ -214,11 +214,147 @@ CREATE TABLE IF NOT EXISTS candidate_etf (
 """
 
 
+DDL_INDEX_DAILY = """
+CREATE TABLE IF NOT EXISTS index_daily (
+    code varchar(10) NOT NULL,
+    name varchar(32) NOT NULL DEFAULT '',
+    date date NOT NULL,
+    open decimal(12,2) DEFAULT NULL,
+    high decimal(12,2) DEFAULT NULL,
+    low decimal(12,2) DEFAULT NULL,
+    close decimal(12,2) DEFAULT NULL,
+    volume bigint DEFAULT NULL,
+    amount decimal(20,2) DEFAULT NULL,
+    pct_chg decimal(8,4) DEFAULT NULL,
+    `change` decimal(12,2) DEFAULT NULL,
+    turnover decimal(8,4) DEFAULT NULL,
+    created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (code, date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+DDL_STOCK_MONEYFLOW = """
+CREATE TABLE IF NOT EXISTS stock_moneyflow (
+    code varchar(10) NOT NULL,
+    date date NOT NULL,
+    main_net_inflow decimal(20,2) DEFAULT NULL COMMENT '主力净流入(元)',
+    main_net_pct decimal(8,4) DEFAULT NULL COMMENT '主力净占比%',
+    super_net_inflow decimal(20,2) DEFAULT NULL COMMENT '超大单净流入(元)',
+    big_net_inflow decimal(20,2) DEFAULT NULL COMMENT '大单净流入(元)',
+    mid_net_inflow decimal(20,2) DEFAULT NULL COMMENT '中单净流入(元)',
+    small_net_inflow decimal(20,2) DEFAULT NULL COMMENT '小单净流入(元)',
+    created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (code, date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+DDL_CONCEPT_DAILY = """
+CREATE TABLE IF NOT EXISTS concept_daily (
+    board_code varchar(10) NOT NULL,
+    board_name varchar(32) DEFAULT '',
+    date date NOT NULL,
+    low decimal(12,2) DEFAULT NULL,
+    high decimal(12,2) DEFAULT NULL,
+    close decimal(12,2) DEFAULT NULL,
+    prev_close decimal(12,2) DEFAULT NULL,
+    volume bigint DEFAULT NULL,
+    amount decimal(20,2) DEFAULT NULL,
+    pct_chg decimal(8,4) DEFAULT NULL,
+    `change` decimal(12,2) DEFAULT NULL,
+    advance int DEFAULT NULL,
+    decline int DEFAULT NULL,
+    net_inflow decimal(20,2) DEFAULT NULL,
+    created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (board_code, date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+DDL_VOLUME_PRICE = """
+CREATE TABLE IF NOT EXISTS volume_price_analysis (
+    code varchar(10) NOT NULL,
+    name varchar(32) DEFAULT '',
+    board_code varchar(10) DEFAULT '',
+    board_name varchar(32) DEFAULT '',
+    date date NOT NULL COMMENT '交易日',
+    close decimal(12,2) DEFAULT NULL,
+    pct_chg decimal(8,4) DEFAULT NULL COMMENT '当日涨跌幅%',
+    chg_5d decimal(8,4) DEFAULT NULL COMMENT '近5日涨幅%',
+    chg_20d decimal(8,4) DEFAULT NULL COMMENT '近20日涨幅%',
+    volume bigint DEFAULT NULL COMMENT '当日成交量(手)',
+    amount decimal(20,2) DEFAULT NULL COMMENT '当日成交额(元)',
+    vol_chg_pct decimal(8,2) DEFAULT NULL COMMENT '当日量能变化(vs昨日)%',
+    vol_ratio_5 decimal(8,2) DEFAULT NULL COMMENT '量比(当日/前5日均量)',
+    vol_trend varchar(8) NOT NULL DEFAULT '' COMMENT '量能趋势: 放大/平稳/萎缩',
+    position_60d decimal(6,2) DEFAULT NULL COMMENT '60日价格位置0-100',
+    vol_pattern varchar(20) NOT NULL DEFAULT '' COMMENT '量价形态(九宫格)',
+    divergence varchar(10) NOT NULL DEFAULT '' COMMENT '量价背离: 顶背离/底背离/无',
+    is_volume_peak tinyint NOT NULL DEFAULT 0 COMMENT '天量(60日最大量)',
+    is_volume_trough tinyint NOT NULL DEFAULT 0 COMMENT '地量(60日最小量)',
+    vp_score decimal(4,2) DEFAULT NULL COMMENT '量价评分(0-5)',
+    created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (code, date),
+    KEY idx_date (date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+DDL_CANDIDATE_SECTOR_VOLRISE = """
+CREATE TABLE IF NOT EXISTS candidate_sector_volrise (
+    board_code varchar(10) NOT NULL,
+    board_name varchar(32) DEFAULT '',
+    board_type varchar(12) NOT NULL DEFAULT 'industry' COMMENT 'industry=行业 concept=概念',
+    date date NOT NULL COMMENT '最近命中交易日',
+    identified_at date NOT NULL COMMENT '识别日期',
+    close decimal(12,2) DEFAULT NULL COMMENT '命中日收盘',
+    pct_chg decimal(8,4) DEFAULT NULL COMMENT '命中日板块涨幅%',
+    volume bigint DEFAULT NULL COMMENT '命中日成交量',
+    vol_ring_pct decimal(8,2) DEFAULT NULL COMMENT '命中日量环比%(vs前一交易日)',
+    hit_days int DEFAULT NULL COMMENT '近3交易日命中天数',
+    ret_3d decimal(8,4) DEFAULT NULL COMMENT '命中日近3日累计涨幅%',
+    created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (board_code, board_type, identified_at),
+    KEY idx_identified (identified_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+DDL_CANDIDATE_STOCK_VOLRISE = """
+CREATE TABLE IF NOT EXISTS candidate_stock_volrise (
+    code varchar(10) NOT NULL,
+    name varchar(32) DEFAULT '',
+    board_code varchar(10) DEFAULT '',
+    board_name varchar(32) DEFAULT '',
+    date date NOT NULL COMMENT '最近命中交易日',
+    identified_at date NOT NULL COMMENT '识别日期',
+    close decimal(12,2) DEFAULT NULL COMMENT '命中日收盘',
+    pct_chg decimal(8,4) DEFAULT NULL COMMENT '命中日个股涨幅%',
+    volume bigint DEFAULT NULL COMMENT '命中日成交量',
+    vol_ring_pct decimal(8,2) DEFAULT NULL COMMENT '命中日个股量环比%',
+    sector_pct_chg decimal(8,4) DEFAULT NULL COMMENT '命中日所属板块涨幅%',
+    hit_days int DEFAULT NULL COMMENT '近3交易日命中天数',
+    ret_3d decimal(8,4) DEFAULT NULL COMMENT '命中日近3日累计涨幅%',
+    created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (code, identified_at),
+    KEY idx_identified (identified_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+
 TABLE_DDL = {
     "stock_list": DDL_STOCK_LIST,
     "stock_daily": DDL_STOCK_DAILY,
     "sector_daily": DDL_SECTOR_DAILY,
     "etf_daily": DDL_ETF_DAILY,
+    "index_daily": DDL_INDEX_DAILY,
+    "stock_moneyflow": DDL_STOCK_MONEYFLOW,
+    "concept_daily": DDL_CONCEPT_DAILY,
+    "volume_price_analysis": DDL_VOLUME_PRICE,
+    "candidate_sector_volrise": DDL_CANDIDATE_SECTOR_VOLRISE,
+    "candidate_stock_volrise": DDL_CANDIDATE_STOCK_VOLRISE,
     "email_subscription": DDL_EMAIL_SUBSCRIPTION,
     "candidate_sector": DDL_CANDIDATE_SECTOR,
     "candidate_stock": DDL_CANDIDATE_STOCK,
@@ -286,6 +422,12 @@ def create_tables():
                 logger.info(f"stock_daily 表已补 {col} 列")
         cursor.execute(DDL_SECTOR_DAILY)
         cursor.execute(DDL_ETF_DAILY)
+        cursor.execute(DDL_INDEX_DAILY)
+        cursor.execute(DDL_STOCK_MONEYFLOW)
+        cursor.execute(DDL_CONCEPT_DAILY)
+        cursor.execute(DDL_VOLUME_PRICE)
+        cursor.execute(DDL_CANDIDATE_SECTOR_VOLRISE)
+        cursor.execute(DDL_CANDIDATE_STOCK_VOLRISE)
         cursor.execute(DDL_EMAIL_SUBSCRIPTION)
         cursor.execute(DDL_CANDIDATE_SECTOR)
         cursor.execute(DDL_CANDIDATE_STOCK)
@@ -346,7 +488,9 @@ def create_tables():
                     cursor.execute(f"ALTER TABLE {tbl} {ddl}")
                     logger.info(f"{tbl} 表已补 {col_name} 列")
         conn.commit()
-        logger.info("表结构创建完成: stock_list / stock_daily / sector_daily / etf_daily / email_subscription / candidate_sector / candidate_stock / candidate_etf")
+        logger.info("表结构创建完成: stock_list / stock_daily / sector_daily / etf_daily / "
+                    "email_subscription / candidate_sector / candidate_stock / candidate_etf / "
+                    "volume_price_analysis")
     except Exception as e:
         conn.rollback()
         raise e
@@ -480,7 +624,11 @@ def save_stock_list_to_db(df: pd.DataFrame):
 
 def save_stock_daily_to_db(df: pd.DataFrame):
     """写入个股日线 (date/code/name/board_code/board_name/prev_close/open/
-    high/low/close/pct_chg/volume/amount/macd/macd_signal/macd_hist)"""
+    high/low/close/pct_chg/volume/amount/macd/macd_signal/macd_hist)
+
+    非破坏性 UPSERT: 数值列 COALESCE 保留旧非空值, 空板块映射不清空旧映射,
+    避免补拉/重跑时把已有数据覆盖成 NULL。
+    """
     cols = ["code", "date", "name", "board_code", "board_name",
             "prev_close", "open", "high", "low", "close", "pct_chg",
             "volume", "amount", "macd", "macd_signal", "macd_hist"]
@@ -490,18 +638,30 @@ def save_stock_daily_to_db(df: pd.DataFrame):
               volume, amount, macd, macd_signal, macd_hist)
              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
              ON DUPLICATE KEY UPDATE
-             name=VALUES(name), board_code=VALUES(board_code),
-             board_name=VALUES(board_name), prev_close=VALUES(prev_close),
-             open=VALUES(open), high=VALUES(high), low=VALUES(low),
-             close=VALUES(close), pct_chg=VALUES(pct_chg), volume=VALUES(volume),
-             amount=VALUES(amount), macd=VALUES(macd),
-             macd_signal=VALUES(macd_signal), macd_hist=VALUES(macd_hist)"""
+             name=VALUES(name),
+             board_code=IF(VALUES(board_code)='', board_code, VALUES(board_code)),
+             board_name=IF(VALUES(board_name)='', board_name, VALUES(board_name)),
+             prev_close=COALESCE(VALUES(prev_close), prev_close),
+             open=COALESCE(VALUES(open), open),
+             high=COALESCE(VALUES(high), high),
+             low=COALESCE(VALUES(low), low),
+             close=COALESCE(VALUES(close), close),
+             pct_chg=COALESCE(VALUES(pct_chg), pct_chg),
+             volume=COALESCE(VALUES(volume), volume),
+             amount=COALESCE(VALUES(amount), amount),
+             macd=COALESCE(VALUES(macd), macd),
+             macd_signal=COALESCE(VALUES(macd_signal), macd_signal),
+             macd_hist=COALESCE(VALUES(macd_hist), macd_hist)"""
     _write_df(df, sql, cols, "stock_daily")
 
 
 def save_sector_daily_to_db(df: pd.DataFrame):
     """写入板块日线 (board_code/board_name/date/low/high/close/prev_close/
-    volume/amount/pct_chg/change/advance/decline/net_inflow)"""
+    volume/amount/pct_chg/change/advance/decline/net_inflow)
+
+    非破坏性 UPSERT: 重拉K线时 advance/decline/net_inflow 传 NULL 不清旧值,
+    由 refresh_sector_stats 单独回填。
+    """
     cols = ["board_code", "board_name", "date", "low", "high", "close",
             "prev_close", "volume", "amount", "pct_chg", "change",
             "advance", "decline", "net_inflow"]
@@ -511,17 +671,23 @@ def save_sector_daily_to_db(df: pd.DataFrame):
               advance, decline, net_inflow)
              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
              ON DUPLICATE KEY UPDATE
-             board_name=VALUES(board_name), low=VALUES(low), high=VALUES(high),
-             close=VALUES(close), prev_close=VALUES(prev_close),
-             volume=VALUES(volume), amount=VALUES(amount), pct_chg=VALUES(pct_chg),
-             `change`=VALUES(`change`), advance=VALUES(advance), decline=VALUES(decline),
-             net_inflow=VALUES(net_inflow)"""
+             board_name=VALUES(board_name),
+             low=COALESCE(VALUES(low), low), high=COALESCE(VALUES(high), high),
+             close=COALESCE(VALUES(close), close),
+             prev_close=COALESCE(VALUES(prev_close), prev_close),
+             volume=COALESCE(VALUES(volume), volume),
+             amount=COALESCE(VALUES(amount), amount),
+             pct_chg=COALESCE(VALUES(pct_chg), pct_chg),
+             `change`=COALESCE(VALUES(`change`), `change`),
+             advance=COALESCE(VALUES(advance), advance),
+             decline=COALESCE(VALUES(decline), decline),
+             net_inflow=COALESCE(VALUES(net_inflow), net_inflow)"""
     _write_df(df, sql, cols, "sector_daily")
 
 
 def save_etf_daily_to_db(df: pd.DataFrame):
     """写入ETF日线 (code/name/date/prev_close/open/high/low/close/volume/amount/
-    pct_chg/change)"""
+    pct_chg/change); 非破坏性 UPSERT"""
     cols = ["code", "name", "date", "prev_close", "open", "high", "low",
             "close", "volume", "amount", "pct_chg", "change"]
     sql = """INSERT INTO etf_daily
@@ -529,11 +695,193 @@ def save_etf_daily_to_db(df: pd.DataFrame):
               close, volume, amount, pct_chg, `change`)
              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
              ON DUPLICATE KEY UPDATE
-             name=VALUES(name), prev_close=VALUES(prev_close), open=VALUES(open),
-             high=VALUES(high), low=VALUES(low), close=VALUES(close),
-             volume=VALUES(volume), amount=VALUES(amount), pct_chg=VALUES(pct_chg),
-             `change`=VALUES(`change`)"""
+             name=VALUES(name),
+             prev_close=COALESCE(VALUES(prev_close), prev_close),
+             open=COALESCE(VALUES(open), open),
+             high=COALESCE(VALUES(high), high),
+             low=COALESCE(VALUES(low), low),
+             close=COALESCE(VALUES(close), close),
+             volume=COALESCE(VALUES(volume), volume),
+             amount=COALESCE(VALUES(amount), amount),
+             pct_chg=COALESCE(VALUES(pct_chg), pct_chg),
+             `change`=COALESCE(VALUES(`change`), `change`)"""
     _write_df(df, sql, cols, "etf_daily")
+
+
+def save_index_daily_to_db(df: pd.DataFrame):
+    """写入指数日线 (code/name/date/open/high/low/close/volume/amount/pct_chg/
+    change/turnover)"""
+    cols = ["code", "name", "date", "open", "high", "low", "close",
+            "volume", "amount", "pct_chg", "change", "turnover"]
+    sql = """INSERT INTO index_daily
+             (code, name, date, open, high, low, close,
+              volume, amount, pct_chg, `change`, turnover)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             ON DUPLICATE KEY UPDATE
+             name=VALUES(name),
+             open=COALESCE(VALUES(open), open), high=COALESCE(VALUES(high), high),
+             low=COALESCE(VALUES(low), low), close=COALESCE(VALUES(close), close),
+             volume=COALESCE(VALUES(volume), volume),
+             amount=COALESCE(VALUES(amount), amount),
+             pct_chg=COALESCE(VALUES(pct_chg), pct_chg),
+             `change`=COALESCE(VALUES(`change`), `change`),
+             turnover=COALESCE(VALUES(turnover), turnover)"""
+    _write_df(df, sql, cols, "index_daily")
+
+
+def save_stock_moneyflow_to_db(df: pd.DataFrame):
+    """写入个股资金流 (code/date/main_net_inflow/main_net_pct/super/big/mid/small)"""
+    cols = ["code", "date", "main_net_inflow", "main_net_pct",
+            "super_net_inflow", "big_net_inflow",
+            "mid_net_inflow", "small_net_inflow"]
+    sql = """INSERT INTO stock_moneyflow
+             (code, date, main_net_inflow, main_net_pct,
+              super_net_inflow, big_net_inflow, mid_net_inflow, small_net_inflow)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+             ON DUPLICATE KEY UPDATE
+             main_net_inflow=COALESCE(VALUES(main_net_inflow), main_net_inflow),
+             main_net_pct=COALESCE(VALUES(main_net_pct), main_net_pct),
+             super_net_inflow=COALESCE(VALUES(super_net_inflow), super_net_inflow),
+             big_net_inflow=COALESCE(VALUES(big_net_inflow), big_net_inflow),
+             mid_net_inflow=COALESCE(VALUES(mid_net_inflow), mid_net_inflow),
+             small_net_inflow=COALESCE(VALUES(small_net_inflow), small_net_inflow)"""
+    _write_df(df, sql, cols, "stock_moneyflow")
+
+
+def save_concept_daily_to_db(df: pd.DataFrame):
+    """写入概念板块日线 (结构同 sector_daily)"""
+    cols = ["board_code", "board_name", "date", "low", "high", "close",
+            "prev_close", "volume", "amount", "pct_chg", "change",
+            "advance", "decline", "net_inflow"]
+    sql = """INSERT INTO concept_daily
+             (board_code, board_name, date, low, high, close,
+              prev_close, volume, amount, pct_chg, `change`,
+              advance, decline, net_inflow)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             ON DUPLICATE KEY UPDATE
+             board_name=VALUES(board_name),
+             low=COALESCE(VALUES(low), low), high=COALESCE(VALUES(high), high),
+             close=COALESCE(VALUES(close), close),
+             prev_close=COALESCE(VALUES(prev_close), prev_close),
+             volume=COALESCE(VALUES(volume), volume),
+             amount=COALESCE(VALUES(amount), amount),
+             pct_chg=COALESCE(VALUES(pct_chg), pct_chg),
+             `change`=COALESCE(VALUES(`change`), `change`),
+             advance=COALESCE(VALUES(advance), advance),
+             decline=COALESCE(VALUES(decline), decline),
+             net_inflow=COALESCE(VALUES(net_inflow), net_inflow)"""
+    _write_df(df, sql, cols, "concept_daily")
+
+
+def save_volume_price_to_db(df: pd.DataFrame):
+    """写入量价分析结果 (code/date 为主键, upsert)"""
+    cols = ["code", "name", "board_code", "board_name", "date", "close",
+            "pct_chg", "chg_5d", "chg_20d", "volume", "amount",
+            "vol_chg_pct", "vol_ratio_5", "vol_trend", "position_60d",
+            "vol_pattern", "divergence", "is_volume_peak",
+            "is_volume_trough", "vp_score"]
+    sql = """INSERT INTO volume_price_analysis
+             (code, name, board_code, board_name, date, close,
+              pct_chg, chg_5d, chg_20d, volume, amount,
+              vol_chg_pct, vol_ratio_5, vol_trend, position_60d,
+              vol_pattern, divergence, is_volume_peak,
+              is_volume_trough, vp_score)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             ON DUPLICATE KEY UPDATE
+             name=VALUES(name), board_code=VALUES(board_code),
+             board_name=VALUES(board_name), close=VALUES(close),
+             pct_chg=VALUES(pct_chg), chg_5d=VALUES(chg_5d),
+             chg_20d=VALUES(chg_20d), volume=VALUES(volume),
+             amount=VALUES(amount), vol_chg_pct=VALUES(vol_chg_pct),
+             vol_ratio_5=VALUES(vol_ratio_5), vol_trend=VALUES(vol_trend),
+             position_60d=VALUES(position_60d),
+             vol_pattern=VALUES(vol_pattern), divergence=VALUES(divergence),
+             is_volume_peak=VALUES(is_volume_peak),
+             is_volume_trough=VALUES(is_volume_trough),
+             vp_score=VALUES(vp_score)"""
+    _write_df(df, sql, cols, "volume_price_analysis")
+
+
+def save_candidate_sector_volrise(df: pd.DataFrame):
+    """写入量增价涨候选板块 (upsert, 独立于 candidate_sector, 不清空任何原候选表)"""
+    cols = ["board_code", "board_name", "board_type", "date", "identified_at",
+            "close", "pct_chg", "volume", "vol_ring_pct", "hit_days", "ret_3d"]
+    sql = """INSERT INTO candidate_sector_volrise
+             (board_code, board_name, board_type, date, identified_at,
+              close, pct_chg, volume, vol_ring_pct, hit_days, ret_3d)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             ON DUPLICATE KEY UPDATE
+             board_name=VALUES(board_name), date=VALUES(date),
+             close=VALUES(close), pct_chg=VALUES(pct_chg),
+             volume=VALUES(volume), vol_ring_pct=VALUES(vol_ring_pct),
+             hit_days=VALUES(hit_days), ret_3d=VALUES(ret_3d)"""
+    _write_df(df, sql, cols, "candidate_sector_volrise")
+
+
+def save_candidate_stock_volrise(df: pd.DataFrame):
+    """写入量增价涨候选股票 (upsert, 独立于 candidate_stock, 不清空任何原候选表)"""
+    cols = ["code", "name", "board_code", "board_name", "date", "identified_at",
+            "close", "pct_chg", "volume", "vol_ring_pct", "sector_pct_chg",
+            "hit_days", "ret_3d"]
+    sql = """INSERT INTO candidate_stock_volrise
+             (code, name, board_code, board_name, date, identified_at,
+              close, pct_chg, volume, vol_ring_pct, sector_pct_chg,
+              hit_days, ret_3d)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             ON DUPLICATE KEY UPDATE
+             name=VALUES(name), board_code=VALUES(board_code),
+             board_name=VALUES(board_name), date=VALUES(date),
+             close=VALUES(close), pct_chg=VALUES(pct_chg),
+             volume=VALUES(volume), vol_ring_pct=VALUES(vol_ring_pct),
+             sector_pct_chg=VALUES(sector_pct_chg),
+             hit_days=VALUES(hit_days), ret_3d=VALUES(ret_3d)"""
+    _write_df(df, sql, cols, "candidate_stock_volrise")
+
+
+def update_sector_breadth(rows: list):
+    """批量回填板块涨跌家数 rows=[(board_code, date, advance, decline), ...]"""
+    if not rows:
+        return 0
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.executemany(
+            "UPDATE sector_daily SET advance=%s, decline=%s "
+            "WHERE board_code=%s AND date=%s",
+            [(a, d, c, dt) for c, dt, a, d in rows],
+        )
+        conn.commit()
+        logger.info(f"板块涨跌家数已回填 {len(rows)} 行")
+        return len(rows)
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def update_sector_net_inflow(rows: list):
+    """批量回填板块资金净流入 rows=[(net_inflow, board_code, date), ...]"""
+    if not rows:
+        return 0
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.executemany(
+            "UPDATE sector_daily SET net_inflow=%s "
+            "WHERE board_code=%s AND date=%s",
+            rows,
+        )
+        conn.commit()
+        logger.info(f"板块资金净流入已回填 {len(rows)} 行")
+        return len(rows)
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def save_candidate_sector_to_db(df: pd.DataFrame):

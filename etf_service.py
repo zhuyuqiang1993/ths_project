@@ -162,10 +162,15 @@ def build_etf_daily(
     start_date: str = "",
     end_date: str = "",
     max_etfs: int = 0,
+    only_codes: list = None,
 ) -> pd.DataFrame:
-    all_rows = []
     codes = etf_list[COL_CODE].tolist()
     name_map = etf_list.set_index(COL_CODE)[COL_NAME].to_dict()
+
+    if only_codes:
+        keep = set(str(c) for c in only_codes)
+        codes = [c for c in codes if str(c) in keep]
+        logger.info(f"定点修复模式: 仅处理 {len(codes)} 只ETF (指定 {len(keep)})")
 
     if max_etfs > 0:
         codes = codes[:max_etfs]
@@ -173,33 +178,52 @@ def build_etf_daily(
     total = len(codes)
     logger.info(f"开始获取 {total} 只ETF日线...")
 
+    # 分轮抓取: hexin-v 偶发失效会导致整批为空, 失败代码用新v_code重试
+    ok_map = {}
     batch_size = 100
-    for batch_start in range(0, total, batch_size):
-        batch = codes[batch_start:batch_start + batch_size]
-        v_code = _get_ths_v()
-        results = {}
-        with ThreadPoolExecutor(max_workers=20) as pool:
-            futures = {
-                pool.submit(fetch_etf_daily, c, start_date, end_date, v_code): c
-                for c in batch
-            }
-            for f in as_completed(futures):
-                c = futures[f]
-                try:
-                    results[c] = f.result()
-                except Exception:
-                    results[c] = None
+    pending = list(codes)
+    for p in range(3):
+        if not pending:
+            break
+        for batch_start in range(0, len(pending), batch_size):
+            batch = pending[batch_start:batch_start + batch_size]
+            v_code = _get_ths_v()
+            results = {}
+            with ThreadPoolExecutor(max_workers=20) as pool:
+                futures = {
+                    pool.submit(fetch_etf_daily, c, start_date, end_date, v_code): c
+                    for c in batch
+                }
+                for f in as_completed(futures):
+                    c = futures[f]
+                    try:
+                        results[c] = f.result()
+                    except Exception:
+                        results[c] = None
+            for c, df in results.items():
+                if df is not None and not df.empty:
+                    ok_map[c] = df
+            n_ok = sum(1 for df in results.values() if df is not None and not df.empty)
+            logger.info(f"  ETF进度: {min(batch_start+batch_size, len(pending))}"
+                        f"/{len(pending)} (成功{n_ok})")
+        still_failed = [c for c in pending if ok_map.get(c) is None]
+        if still_failed and p < 2:
+            logger.warning(f"  {len(still_failed)} 只ETF无数据, 第{p+2}轮重试...")
+            time.sleep(3)
+            pending = still_failed
+        else:
+            if still_failed:
+                logger.warning(f"  仍有 {len(still_failed)} 只ETF无数据")
+            pending = []
 
-        for c, df in results.items():
-            if df is not None and not df.empty:
-                df[COL_CODE] = c
-                df[COL_NAME] = name_map.get(c, c)
-                all_rows.append(df)
-        n_ok = sum(1 for df in results.values() if df is not None and not df.empty)
-        logger.info(f"  ETF进度: {min(batch_start+batch_size, total)}/{total} (成功{n_ok})")
-
-    if not all_rows:
+    if not ok_map:
         return pd.DataFrame()
+
+    all_rows = []
+    for c, df in ok_map.items():
+        df[COL_CODE] = c
+        df[COL_NAME] = name_map.get(c, c)
+        all_rows.append(df)
 
     result = pd.concat(all_rows, ignore_index=True)
     cols = [
@@ -213,11 +237,12 @@ def build_etf_daily(
     return result
 
 
-def run(start_date: str = "", end_date: str = "", max_etfs: int = 0):
+def run(start_date: str = "", end_date: str = "", max_etfs: int = 0,
+        force: bool = False, only_codes: list = None):
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
 
     # 增量优化: 检查DB中是否已有目标日期范围的数据, 有则跳过API调用
-    if start_date and end_date:
+    if start_date and end_date and not force:
         from db_handler import has_data_in_range
         if has_data_in_range("etf_daily", start_date, end_date):
             logger.info("etf_daily 数据已存在, 跳过API拉取")
@@ -226,7 +251,7 @@ def run(start_date: str = "", end_date: str = "", max_etfs: int = 0):
     etf_list = get_etf_list()
     logger.info(f"共 {len(etf_list)} 只ETF")
 
-    df = build_etf_daily(etf_list, start_date, end_date, max_etfs)
+    df = build_etf_daily(etf_list, start_date, end_date, max_etfs, only_codes)
     if df.empty:
         logger.warning("未获取到任何数据")
         return df

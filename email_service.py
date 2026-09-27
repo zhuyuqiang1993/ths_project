@@ -1,4 +1,4 @@
-import smtplib
+﻿import smtplib
 import sys
 import os
 import warnings
@@ -30,12 +30,16 @@ logger.add(
 FEATURE_MARKET = "market_sentiment"
 FEATURE_SECTOR = "sector_screen"
 FEATURE_STOCK = "stock_screen"
+FEATURE_VOLUME = "volume_price"
+FEATURE_VOLRISE = "volrise_screen"
 FEATURE_ETF = "etf_screen"
 
 FEATURE_NAMES = {
     FEATURE_MARKET: "市场情绪识别",
     FEATURE_SECTOR: "候选板块",
     FEATURE_STOCK: "候选个股",
+    FEATURE_VOLUME: "量价分析",
+    FEATURE_VOLRISE: "量增价涨筛选",
     FEATURE_ETF: "候选ETF",
 }
 
@@ -245,6 +249,80 @@ def build_candidate_sector() -> str:
     return _section(FEATURE_SECTOR, html)
 
 
+def build_volume_price() -> str:
+    """量价分析: 从 volume_price_analysis 显示最新交易日分析结果"""
+    latest = _latest_date("volume_price_analysis")
+    if not latest:
+        return _section(FEATURE_VOLUME, "无数据 (量价分析尚未运行)")
+
+    dist = _query(
+        """SELECT vol_pattern, COUNT(*) AS c FROM volume_price_analysis
+           WHERE date = %s GROUP BY vol_pattern ORDER BY c DESC""",
+        (latest,),
+    )
+    sig = _query(
+        """SELECT SUM(is_volume_peak) AS peak, SUM(is_volume_trough) AS trough,
+                  SUM(divergence = '顶背离') AS topdiv,
+                  SUM(divergence = '底背离') AS botdiv
+           FROM volume_price_analysis WHERE date = %s""",
+        (latest,),
+    )
+    df = _query(
+        """SELECT code, name, board_name, close, pct_chg, vol_ratio_5,
+                  vol_trend, position_60d, vol_pattern, divergence,
+                  is_volume_peak, is_volume_trough, vp_score
+           FROM volume_price_analysis WHERE date = %s
+           ORDER BY vp_score DESC LIMIT 20""",
+        (latest,),
+    )
+    if df.empty:
+        return _section(FEATURE_VOLUME, f"交易日 {latest} 无量价分析结果")
+
+    total = _query(
+        "SELECT COUNT(*) AS c FROM volume_price_analysis WHERE date = %s",
+        (latest,),
+    )["c"].iloc[0]
+
+    dist_txt = " | ".join(
+        f"{r['vol_pattern']} {int(r['c'])}" for _, r in dist.iterrows()
+    )
+    s = sig.iloc[0] if not sig.empty else None
+    sig_txt = (f"天量 {int(s['peak'] or 0)} 只, 地量 {int(s['trough'] or 0)} 只, "
+               f"顶背离{int(s['topdiv'] or 0)} 只, 底背离{int(s['botdiv'] or 0)} 只")
+
+    def _v(v, suffix=""):
+        return "" if v is None or pd.isna(v) else f"{v}{suffix}"
+
+    rows = "".join(
+        f"<tr><td>{_n(r['code'])}</td><td>{_n(r['name'])}</td>"
+        f"<td>{_n(r['board_name']) or ''}</td>"
+        f"<td>{_n(r['close']) or ''}</td>"
+        f"<td style='color:{_red_green(r['pct_chg'])}'>{_v(r['pct_chg'], '%')}</td>"
+        f"<td>{_v(r['vol_ratio_5'])}</td>"
+        f"<td>{_v(r['vol_trend'])}</td>"
+        f"<td>{_v(r['position_60d'])}</td>"
+        f"<td>{_v(r['vol_pattern'])}"
+        + (" 天量" if r["is_volume_peak"] else "")
+        + (" 地量" if r["is_volume_trough"] else "")
+        + f"</td><td>{_v(r['divergence'])}</td>"
+        f"<td><b>{_v(r['vp_score'])}</b></td></tr>"
+        for _, r in df.iterrows()
+    )
+    html = f"""
+    <p>交易日 <b>{latest}</b> (全市场 {int(total)} 只)</p>
+    <p><b>形态分布:</b> {dist_txt}</p>
+    <p><b>信号统计:</b> {sig_txt}</p>
+    <p><b>评分 TOP{len(df)} (婴儿肥5)</b></p>
+    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse">
+      <tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>板块</td>
+          <td>收盘</td><td>涨幅</td><td>量比</td><td>量能</td><td>60日位置</td>
+          <td>形态</td><td>背离</td><td>得分</td></tr>
+      {rows}
+    </table>
+    """
+    return _section(FEATURE_VOLUME, html)
+
+
 def build_candidate_etf() -> str:
     """候选ETF: 从 candidate_etf 展示最新识别结果"""
     latest = _latest_identified_at("candidate_etf")
@@ -277,6 +355,87 @@ def build_candidate_etf() -> str:
     </table>
     """
     return _section(FEATURE_ETF, html)
+
+
+def build_volrise() -> str:
+    """量增价涨筛选: 近3日量环比>0 且涨幅>0 的板块/股票"""
+    latest_s = _latest_identified_at("candidate_sector_volrise")
+    latest_t = _latest_identified_at("candidate_stock_volrise")
+    if not latest_s and not latest_t:
+        return _section(FEATURE_VOLRISE, "无数据 (量增价涨筛选尚未运行)")
+
+    type_cn = {"industry": "行业", "concept": "概念"}
+    parts = []
+    latest = latest_s or latest_t
+
+    if latest_s:
+        sdf = _query(
+            """SELECT board_code, board_name, board_type, `date`, pct_chg,
+                      vol_ring_pct, hit_days, ret_3d
+                 FROM candidate_sector_volrise
+                 WHERE identified_at = %s
+                 ORDER BY ret_3d DESC LIMIT 15""",
+            (latest_s,),
+        )
+        if not sdf.empty:
+            srows = "".join(
+                f"<tr><td>{_n(r['board_code'])}</td><td>{_n(r['board_name'])}</td>"
+                f"<td>{type_cn.get(r['board_type'], r['board_type'])}</td>"
+                f"<td>{_n(r['date'])}</td>"
+                f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
+                f"<td>{_n(r['vol_ring_pct']) or ''}%</td>"
+                f"<td>{_n(r['hit_days'])}/3</td>"
+                f"<td>{_n(r['ret_3d']) or ''}%</td></tr>"
+                for _, r in sdf.iterrows()
+            )
+            parts.append(
+                f"<p><b>候选板块</b> ({len(sdf)} 个, 近3日涨幅TOP{len(sdf)})</p>"
+                '<table border="1" cellspacing="0" cellpadding="6" '
+                'style="border-collapse:collapse">'
+                '<tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>类型</td>'
+                '<td>窗口末日</td><td>当日涨幅</td><td>量环比</td><td>满足天数</td>'
+                f"<td>3日涨幅</td></tr>{srows}</table>"
+            )
+
+    if latest_t:
+        tdf = _query(
+            """SELECT code, name, board_name, `date`, pct_chg, vol_ring_pct,
+                      sector_pct_chg, hit_days, ret_3d
+                 FROM candidate_stock_volrise
+                 WHERE identified_at = %s
+                 ORDER BY vol_ring_pct DESC LIMIT 20""",
+            (latest_t,),
+        )
+        if not tdf.empty:
+            trows = "".join(
+                f"<tr><td>{_n(r['code'])}</td><td>{_n(r['name'])}</td>"
+                f"<td>{_n(r['board_name'])}</td>"
+                f"<td>{_n(r['date'])}</td>"
+                f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
+                f"<td>{_n(r['vol_ring_pct']) or ''}%</td>"
+                f"<td>{_n(r['sector_pct_chg']) or ''}%</td>"
+                f"<td>{_n(r['hit_days'])}/3</td>"
+                f"<td>{_n(r['ret_3d']) or ''}%</td></tr>"
+                for _, r in tdf.iterrows()
+            )
+            parts.append(
+                f"<p><b>候选个股</b> ({len(tdf)} 只, 量环比TOP{len(tdf)})</p>"
+                '<table border="1" cellspacing="0" cellpadding="6" '
+                'style="border-collapse:collapse">'
+                '<tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>板块</td>'
+                '<td>窗口末日</td><td>当日涨幅</td><td>个股量环比</td>'
+                '<td>板块涨幅</td><td>满足天数</td>'
+                f"<td>3日涨幅</td></tr>{trows}</table>"
+            )
+
+    if not parts:
+        return _section(FEATURE_VOLRISE, f"识别日期 {latest} 无量增价涨候选")
+
+    html = (
+        f"<p>识别日期: <b>{latest}</b> (最近3个交易日每天都满足: 涨幅>0, 量环比>=-5%; "
+        "个股需其所在板块当日涨幅>0)</p>" + "".join(parts)
+    )
+    return _section(FEATURE_VOLRISE, html)
 
 
 def _call_deepseek(prompt: str) -> str | None:
@@ -319,6 +478,10 @@ def build_email(recipient: str, features: list) -> str:
                 sections.append(build_candidate_sector())
             elif f == FEATURE_STOCK:
                 sections.append(build_candidate_stock())
+            elif f == FEATURE_VOLUME:
+                sections.append(build_volume_price())
+            elif f == FEATURE_VOLRISE:
+                sections.append(build_volrise())
             elif f == FEATURE_ETF:
                 sections.append(build_candidate_etf())
 

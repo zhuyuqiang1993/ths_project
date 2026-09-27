@@ -246,12 +246,63 @@ def compute_day_data(candles: pd.DataFrame, target_date: str) -> dict:
     }
 
 
-def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
+def _fetch_candles_for_codes(codes: list, years: list,
+                             batch_size: int = 200, max_pass: int = 3) -> dict:
+    """按年份抓取K线; 失败批次用新v_code自动重试 (hexin-v 偶发失效会导致整批为空)。"""
+    candles_cache = {}
+    for yr in years:
+        pending = list(codes)
+        n_fail = 0
+        for p in range(max_pass):
+            if not pending:
+                break
+            fetched = {}
+            for batch_start in range(0, len(pending), batch_size):
+                batch = pending[batch_start:batch_start + batch_size]
+                v_code = _get_ths_v()
+                results = {}
+                with ThreadPoolExecutor(max_workers=20) as pool:
+                    futures = {pool.submit(fetch_stock_candles, c, v_code, yr): c
+                               for c in batch}
+                    for f in as_completed(futures):
+                        c = futures[f]
+                        results[c] = f.result()
+                for c, df in results.items():
+                    if df is not None:
+                        if candles_cache.get(c) is not None:
+                            candles_cache[c] = (
+                                pd.concat([candles_cache[c], df])
+                                .drop_duplicates(subset="date")
+                                .sort_values("date").reset_index(drop=True)
+                            )
+                        else:
+                            candles_cache[c] = df
+                fetched.update(results)
+                logger.info(f"  K线 {yr}: {min(batch_start+batch_size, len(pending))}"
+                            f"/{len(pending)}")
+            still_failed = [c for c in pending if fetched.get(c) is None]
+            # 只重试"该年份完全无数据"的代码; 有数据但日期不全的下轮修复
+            n_fail = len(still_failed)
+            if n_fail and p < max_pass - 1:
+                logger.warning(f"  {yr}年K线 {n_fail} 只无数据, 第{p+2}轮重试...")
+                time.sleep(3)
+                pending = still_failed
+            else:
+                pending = []
+        if n_fail:
+            logger.warning(f"  {yr}年K线最终仍有 {n_fail} 只无数据")
+    return candles_cache
+
+
+def run(start_date: str = None, end_date: str = None, force: bool = False,
+        only_codes: list = None) -> pd.DataFrame:
     """获取指定日期/区间的A股日级数据，返回包含MACD的DataFrame。
 
     Args:
         start_date: 起始日期 YYYY-MM-DD；与end_date相同或两者均为None时取当天
         end_date: 结束日期 YYYY-MM-DD
+        force: True 时跳过 DB 完整性预检 (用于历史回补/修复)
+        only_codes: 非空时只处理这些代码 (用于定点修复抓取失败的个股)
 
     Returns:
         包含 date/code/name/board_code/board_name/prev_close/open/.../macd 的DataFrame
@@ -273,7 +324,7 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
     is_today = len(target_dates) == 1 and target_dates[0] == TODAY
 
     # 增量优化: 非当日数据, 检查DB中是否已有目标日期范围的数据, 有则跳过API调用
-    if not is_today:
+    if not is_today and not force:
         from db_handler import has_data_in_range
         if has_data_in_range("stock_daily", target_dates[0], target_dates[-1]):
             logger.info("stock_daily 数据已存在, 跳过API拉取")
@@ -287,30 +338,51 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
     board_map = build_board_mapping(stock_list)
 
     codes = stock_list["code"].tolist()
-    total = len(codes)
     name_map = stock_list.set_index("code")["name"].to_dict()
 
-    # Fetch all candles once per stock
-    logger.info("获取同花顺K线数据...")
-    candles_cache = {}
-    batch_size = 200
-    for batch_start in range(0, total, batch_size):
-        batch = codes[batch_start:batch_start + batch_size]
-        v_code = _get_ths_v()
-        results = {}
-        with ThreadPoolExecutor(max_workers=20) as pool:
-            futures = {pool.submit(fetch_stock_candles, c, v_code): c for c in batch}
-            for f in as_completed(futures):
-                c = futures[f]
-                results[c] = f.result()
-        for c, df in results.items():
-            if df is not None:
-                candles_cache[c] = df
-        logger.info(f"  K线: {min(batch_start+batch_size, total)}/{total}")
+    if only_codes:
+        keep = set(str(c) for c in only_codes)
+        codes = [c for c in codes if c in keep]
+        logger.info(f"定点修复模式: 仅处理 {len(codes)} 只 (指定 {len(keep)})")
+        if not codes:
+            logger.warning("指定代码均不在当前股票列表中")
+            return pd.DataFrame()
+    total = len(codes)
+
+    # Fetch all candles once per stock (按目标区间年份拉取, 支持跨年历史回补)
+    years = sorted({d[:4] for d in target_dates})
+    logger.info(f"获取同花顺K线数据 (年份: {','.join(years)})...")
+    candles_cache = _fetch_candles_for_codes(codes, years)
     logger.info(f"K线获取完成: {len(candles_cache)}/{total} 只")
 
-    # Build rows for each target date
+    # Build rows for each target date; 分块写库, 避免长区间回补时内存膨胀
+    from db_handler import save_stock_daily_to_db
+    flush_size = 150000
     all_rows = []
+    chunks = []
+    n_written = 0
+
+    def _flush():
+        nonlocal all_rows, n_written
+        if not all_rows:
+            return
+        part = pd.DataFrame(all_rows)
+        part = part[[c for c in part.columns if c in output_cols]] if output_cols else part
+        try:
+            save_stock_daily_to_db(part)
+            n_written += len(part)
+        except Exception as e:
+            logger.error(f"MySQL 写入失败: {e}")
+        chunks.append(part)
+        all_rows = []
+
+    output_cols = [
+        "date", "code", "name", "board_code", "board_name",
+        "prev_close", "open", "high", "low", "close", "pct_chg",
+        "volume", "amount",
+        "macd", "macd_signal", "macd_hist",
+    ]
+
     for target_date in target_dates:
         logger.info(f"处理日期 {target_date}...")
 
@@ -321,6 +393,10 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
                 return pd.DataFrame()
             for _, q in quotes_df.iterrows():
                 c = q["code"]
+                price = q["price"]
+                if not price or price <= 0:
+                    # 停牌: 无有效价格, 不写行 (避免污染为 0/NULL)
+                    continue
                 candle = candles_cache.get(c)
                 day_data = compute_day_data(candle, target_date) if candle is not None else {}
                 all_rows.append({
@@ -333,7 +409,7 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
                     "open": q["open"],
                     "high": q["high"],
                     "low": q["low"],
-                    "close": q["price"],
+                    "close": price,
                     "pct_chg": q["pct_chg"],
                     "volume": q["volume"],
                     "amount": q["amount"],
@@ -347,6 +423,9 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
                 if candle is None:
                     continue
                 day_data = compute_day_data(candle, target_date)
+                if day_data.get("close") is None:
+                    # 当日无K线 (停牌/未上市): 跳过, 不写全NULL行
+                    continue
                 all_rows.append({
                     "date": target_date,
                     "code": c,
@@ -356,28 +435,23 @@ def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
                     **day_data,
                 })
 
-    if not all_rows:
+        if len(all_rows) >= flush_size:
+            _flush()
+            logger.info(f"  已分块写入 {n_written} 条")
+
+    _flush()
+
+    if not chunks:
         logger.error("无数据可输出")
         return pd.DataFrame()
 
-    result = pd.DataFrame(all_rows)
-    output_cols = [
-        "date", "code", "name", "board_code", "board_name",
-        "prev_close", "open", "high", "low", "close", "pct_chg",
-        "volume", "amount",
-        "macd", "macd_signal", "macd_hist",
-    ]
+    result = pd.concat(chunks, ignore_index=True)
     result = result[[c for c in output_cols if c in result.columns]]
     result = result.sort_values(["date", "code"]).reset_index(drop=True)
 
-    try:
-        from db_handler import save_stock_daily_to_db
-        save_stock_daily_to_db(result)
-    except Exception as e:
-        logger.error(f"MySQL 写入失败: {e}")
-
     print(f"\n成功: {len(result)} 条记录, {result['date'].nunique()} 个交易日")
-    print(result.head(10).to_string())
+    if len(result) <= 20:
+        print(result.head(20).to_string())
     logger.info("===== A股日级数据采集结束 =====")
 
     return result

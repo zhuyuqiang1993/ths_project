@@ -67,11 +67,15 @@ _HIST_COLS = {
 }
 
 
-def get_ths_boards() -> pd.DataFrame:
-    df = ak.stock_board_industry_name_ths()
+def get_ths_boards(board_type: str = "industry") -> pd.DataFrame:
+    if board_type == "concept":
+        df = ak.stock_board_concept_name_ths()
+    else:
+        df = ak.stock_board_industry_name_ths()
     df.rename(columns={"name": COL_BOARD_NAME, "code": COL_BOARD_CODE}, inplace=True)
     df[COL_BOARD_CODE] = df[COL_BOARD_CODE].astype(str)
-    logger.info(f"同花顺行业板块: {len(df)} 个")
+    kind = "概念" if board_type == "concept" else "行业"
+    logger.info(f"同花顺{kind}板块: {len(df)} 个")
     return df
 
 
@@ -79,6 +83,7 @@ def fetch_ths_board_daily(
     board_name: str,
     start_date: str = "",
     end_date: str = "",
+    board_type: str = "industry",
 ) -> Optional[pd.DataFrame]:
     start = start_date or "20200101"
     end = end_date or datetime.now().strftime("%Y%m%d")
@@ -86,9 +91,11 @@ def fetch_ths_board_daily(
     dt_start = datetime.strptime(start, "%Y%m%d")
     hist_start = (dt_start - timedelta(days=10)).strftime("%Y%m%d")
 
+    fetch_fn = (ak.stock_board_concept_index_ths if board_type == "concept"
+                else ak.stock_board_industry_index_ths)
     for attempt in range(CONFIG.retry_times):
         try:
-            df = ak.stock_board_industry_index_ths(
+            df = fetch_fn(
                 symbol=board_name,
                 start_date=hist_start,
                 end_date=end,
@@ -122,6 +129,7 @@ def build_ths_sector_daily(
     start_date: str = "",
     end_date: str = "",
     max_boards: int = 0,
+    board_type: str = "industry",
 ) -> pd.DataFrame:
     all_rows = []
     board_names = boards[COL_BOARD_NAME].tolist()
@@ -130,7 +138,7 @@ def build_ths_sector_daily(
 
     for i, name in enumerate(board_names, 1):
         logger.info(f"[{i}/{len(board_names)}] {name}...")
-        df_daily = fetch_ths_board_daily(name, start_date, end_date)
+        df_daily = fetch_ths_board_daily(name, start_date, end_date, board_type)
         if df_daily is not None and not df_daily.empty:
             code = boards.loc[boards[COL_BOARD_NAME] == name, COL_BOARD_CODE].values[0]
             df_daily[COL_BOARD_CODE] = code
@@ -159,20 +167,31 @@ def build_ths_sector_daily(
     return result
 
 
-def run(start_date: str = "", end_date: str = "", max_boards: int = 0):
+def run(start_date: str = "", end_date: str = "", max_boards: int = 0,
+        force: bool = False, board_type: str = "industry"):
+    """采集板块日线并写库。
+
+    Args:
+        start_date/end_date: YYYYMMDD
+        max_boards: >0 时只采集前N个板块 (调试用)
+        force: True 跳过 DB 完整性预检
+        board_type: industry=行业板块(sector_daily) / concept=概念板块(concept_daily)
+    """
     CONFIG.log_dir.mkdir(parents=True, exist_ok=True)
+    table = "concept_daily" if board_type == "concept" else "sector_daily"
 
     # 增量优化: 检查DB中是否已有目标日期范围的数据, 有则跳过API调用
-    if start_date and end_date:
+    if start_date and end_date and not force:
         from db_handler import has_data_in_range
-        if has_data_in_range("sector_daily", start_date, end_date):
-            logger.info("sector_daily 数据已存在, 跳过API拉取")
+        if has_data_in_range(table, start_date, end_date):
+            logger.info(f"{table} 数据已存在, 跳过API拉取")
             return pd.DataFrame()
 
-    boards = get_ths_boards()
-    logger.info(f"共 {len(boards)} 个同花顺行业板块")
+    boards = get_ths_boards(board_type)
+    kind = "概念" if board_type == "concept" else "行业"
+    logger.info(f"共 {len(boards)} 个同花顺{kind}板块")
 
-    df = build_ths_sector_daily(boards, start_date, end_date, max_boards)
+    df = build_ths_sector_daily(boards, start_date, end_date, max_boards, board_type)
     if df.empty:
         logger.warning("未获取到任何数据")
         return df
@@ -187,14 +206,77 @@ def run(start_date: str = "", end_date: str = "", max_boards: int = 0):
     logger.info(f"交易日过滤: {n_before} -> {len(df)} 条")
 
     try:
-        from db_handler import save_sector_daily_to_db
-        save_sector_daily_to_db(df)
+        from db_handler import save_sector_daily_to_db, save_concept_daily_to_db
+        if board_type == "concept":
+            save_concept_daily_to_db(df)
+        else:
+            save_sector_daily_to_db(df)
     except Exception as e:
         logger.error(f"MySQL 写入失败: {e}")
     logger.info(f"完成: {len(df)} 条记录, "
                 f"{df[COL_BOARD_CODE].nunique()} 个板块, "
                 f"日期 {df[COL_DATE].min()} ~ {df[COL_DATE].max()}")
+
+    # 行业板块: K线写库后回填涨跌家数与资金净流入
+    if board_type == "industry":
+        try:
+            refresh_sector_stats(df[COL_DATE].min(), df[COL_DATE].max())
+        except Exception as e:
+            logger.error(f"板块统计回填失败: {e}")
     return df
+
+
+def refresh_sector_stats(start_date: str, end_date: str):
+    """回填 sector_daily 的涨跌家数与资金净流入 (幂等, 可重复执行)。
+
+    - advance/decline: 由 stock_daily 按 board_code/date 聚合涨跌幅推导
+    - net_inflow: 由 stock_moneyflow 关联 stock_daily 板块归属聚合主力净流入
+    """
+    s = start_date.replace("-", "")
+    e = end_date.replace("-", "")
+    from db_handler import (get_connection, update_sector_breadth,
+                            update_sector_net_inflow, ensure_table)
+    ensure_table("stock_moneyflow")  # 首次运行前表可能未建
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """SELECT board_code, `date`, SUM(pct_chg > 0), SUM(pct_chg < 0)
+                   FROM stock_daily
+                   WHERE board_code <> '' AND `date` BETWEEN %s AND %s
+                     AND pct_chg IS NOT NULL
+                   GROUP BY board_code, `date`""",
+                (s, e),
+            )
+            breadth = cursor.fetchall()
+            if breadth:
+                update_sector_breadth(
+                    [(str(r[0]), str(r[1]), int(r[2]), int(r[3])) for r in breadth]
+                )
+
+            cursor.execute(
+                """SELECT sd.board_code, mf.`date`, SUM(mf.main_net_inflow)
+                   FROM stock_moneyflow mf
+                   JOIN stock_daily sd
+                     ON sd.code = mf.code AND sd.`date` = mf.`date`
+                   WHERE sd.board_code <> '' AND mf.`date` BETWEEN %s AND %s
+                   GROUP BY sd.board_code, mf.`date`""",
+                (s, e),
+            )
+            inflow = cursor.fetchall()
+            if inflow:
+                update_sector_net_inflow(
+                    [(r[2], str(r[0]), str(r[1])) for r in inflow]
+                )
+            logger.info(
+                f"板块统计回填完成 ({start_date}~{end_date}): "
+                f"涨跌家数 {len(breadth)} 行, 资金流入 {len(inflow)} 行"
+            )
+        finally:
+            cursor.close()
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
