@@ -20,8 +20,8 @@ class Config:
     retry_delay: float = 2.0
     request_interval: float = 0.5
 
-    # daily_run_time: str = "18:30"
-    daily_run_time: str = "21:37"
+    daily_run_time: str = "18:30"
+    # daily_run_time: str = "21:37"
 
     csv_encoding: str = "utf-8-sig"
 
