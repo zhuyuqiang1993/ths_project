@@ -157,6 +157,15 @@ def screen_sectors(identified_date: str = "") -> pd.DataFrame:
             "vol_ratio": sc["vol_ratio"],
             "advance": last["advance"],
             "decline": last["decline"],
+            "low": sc["low"],
+            "high": sc["high"],
+            "prev_close": sc["prev_close"],
+            "volume": sc["volume"],
+            "amount": sc["amount"],
+            "pct_chg": sc["pct_chg"],
+            "change": sc["change"],
+            "net_inflow": sc["net_inflow"],
+            "chg_5d": sc["chg_5d"],
         })
 
     if not scores:

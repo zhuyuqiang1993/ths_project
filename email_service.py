@@ -1,6 +1,7 @@
 ﻿import smtplib
 import sys
 import os
+import re
 import warnings
 from datetime import date, datetime, timedelta
 from email.header import Header
@@ -106,16 +107,104 @@ def _n(v):
     return v
 
 
+def _pct(v) -> str:
+    """涨幅统一保留2位小数, 空值返回空串"""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    return f"{float(v):.2f}%"
+
+
 def _red_green(val):
     if val is None or pd.isna(val):
         return ""
     return "red" if val >= 0 else "green"
 
 
+def _txt(v) -> str:
+    """任意值转字符串, 空值渲染为空串"""
+    n = _n(v)
+    return "" if n is None else str(n)
+
+
+def _num(v, digits: int = 2) -> str:
+    """数值固定小数位, 空值为空串"""
+    n = _n(v)
+    return "" if n is None else f"{float(n):.{digits}f}"
+
+
+def _pct_cell(v) -> str:
+    """涨幅单元格: 红涨绿跌"""
+    if _n(v) is None:
+        return ""
+    return f'<span style="color:{_red_green(v)}">{_pct(v)}</span>'
+
+
+# ---------- 统一排版样式 ----------
+_TABLE_W = 760            # 正文/表格统一宽度(px)
+_TH_STYLE = ("border:1px solid #ccd4dc;background-color:#3d566e;"
+             "color:#ffffff;font-weight:bold;white-space:nowrap")
+
+# 4列候选表 (候选板块/候选个股/量增价涨) 统一列宽与对齐, 保证各板块表格上下对齐
+_H4 = ["代码", "名称", "当日涨幅", "类型"]
+_W4 = [16, 34, 26, 24]
+_A4 = ["center", "left", "right", "center"]
+
+
+def _table(headers, rows, widths, aligns, compact: bool = False) -> str:
+    """生成统一样式表格.
+
+    headers: 列头文本列表
+    rows:    [[单元格HTML, ...], ...]
+    widths:  各列宽度百分比 (总和=100), table-layout:fixed 下严格生效
+    aligns:  各列对齐 left/center/right
+    compact: 紧凑模式 (列多的表用)
+    """
+    fs = 12 if compact else 13
+    pad = "4px 5px" if compact else "6px 8px"
+    td_base = f"border:1px solid #d8dee4;padding:{pad};font-size:{fs}px"
+    th_base = f"{_TH_STYLE};padding:{pad};font-size:{fs}px"
+    cols = "".join(f'<col style="width:{w}%">' for w in widths)
+    ths = "".join(
+        f'<th style="{th_base};text-align:{a}">{h}</th>'
+        for h, a in zip(headers, aligns)
+    )
+    trs = []
+    for i, row in enumerate(rows):
+        bg = "" if i % 2 == 0 else "background-color:#f4f7fa;"
+        tds = "".join(
+            f'<td style="{td_base};{bg}text-align:{a}">{c}</td>'
+            for c, a in zip(row, aligns)
+        )
+        trs.append(f"<tr>{tds}</tr>")
+    return (
+        f'<table cellspacing="0" style="width:100%;border-collapse:collapse;'
+        f'table-layout:fixed;margin:0 0 8px;'
+        f'font-family:Microsoft YaHei,Arial,sans-serif">{cols}'
+        f"<tr>{ths}</tr>{''.join(trs)}</table>"
+    )
+
+
+def _p(text: str) -> str:
+    """普通说明段落"""
+    return f'<p style="margin:6px 0;color:#444;font-size:13px">{text}</p>'
+
+
+def _label(text: str) -> str:
+    """表前小标题"""
+    return f'<p style="margin:12px 0 6px;font-size:13px;color:#1f3b54">{text}</p>'
+
+
+def _info(text: str) -> str:
+    """汇总信息条"""
+    return (f'<p style="margin:6px 0;padding:6px 10px;background-color:#f4f7fa;'
+            f'border-left:3px solid #3d566e;color:#555;font-size:12.5px">{text}</p>')
+
+
 def _section(feature: str, body: str) -> str:
     title = FEATURE_NAMES.get(feature, feature)
     return f"""
-    <h3 style="border-bottom:2px solid #333;padding-bottom:4px">{title}</h3>
+    <h3 style="margin:20px 0 10px;padding:6px 12px;font-size:15px;font-weight:bold;
+               color:#1f3b54;background-color:#e8eef4;border-left:4px solid #3d566e">{title}</h3>
     {body}
     """
 
@@ -151,7 +240,45 @@ def build_market_sentiment() -> str:
         extensions=["tables", "fenced_code", "nl2br"],
         output_format="html",
     )
-    return _section(FEATURE_MARKET, body)
+    return _section(FEATURE_MARKET, _style_report(body))
+
+
+def _style_report(html: str) -> str:
+    """给 markdown 生成的报告 HTML 补上与全邮件一致的样式
+    (markdown 输出的 th/td 自带 style, 需合并而非覆盖)"""
+
+    def _merge(tag: str, css: str):
+        def repl(m):
+            attrs = m.group(1) or ""
+            sm = re.search(r'style="([^"]*)"', attrs)
+            if sm:
+                attrs = (attrs[:sm.start(1)] + css + ";" + sm.group(1)
+                         + attrs[sm.end(1):])
+            else:
+                attrs = f'{attrs} style="{css}"' if attrs else f' style="{css}"'
+            return f"<{tag}{attrs}>"
+        return repl
+
+    th_css = f"{_TH_STYLE};padding:6px 8px;font-size:13px"
+    td_css = "border:1px solid #d8dee4;padding:6px 8px;font-size:13px"
+    html = re.sub(
+        r"<table>",
+        '<table border="1" cellspacing="0" cellpadding="6" '
+        'style="border-collapse:collapse;width:100%;margin:8px 0;'
+        'font-size:13px;font-family:Microsoft YaHei,Arial,sans-serif">',
+        html,
+    )
+    html = re.sub(r"<th(\s[^>]*)?>", _merge("th", th_css), html)
+    html = re.sub(r"<td(\s[^>]*)?>", _merge("td", td_css), html)
+    for lvl, size in ((1, 17), (2, 16), (3, 15), (4, 14)):
+        html = re.sub(
+            rf"<h{lvl}(\s[^>]*)?>",
+            _merge(f"h{lvl}", f"font-size:{size}px;color:#1f3b54;margin:16px 0 6px"),
+            html,
+        )
+    html = re.sub(r"<li>", '<li style="margin:3px 0">', html)
+    html = re.sub(r"<strong>", '<strong style="color:#1f3b54">', html)
+    return html
 
 
 def _latest_identified_at(table: str) -> str:
@@ -162,90 +289,67 @@ def _latest_identified_at(table: str) -> str:
 
 
 def build_candidate_stock() -> str:
-    """候选个股: 从 candidate_stock 展示最新多因子评分结果"""
+    """候选个股: 从 candidate_stock 展示最新多因子评分结果 (只留代码/名称/当日涨幅/类型)"""
     latest = _latest_identified_at("candidate_stock")
     if not latest:
         return _section(FEATURE_STOCK, "无数据")
 
     df = _query(
-        """SELECT code, name, board_name, tag, open, close, pct_chg,
-                  chg_5d, score, rps_20, rps_60, trend, momentum,
-                  volume_score, macd_score, sector_score
-           FROM candidate_stock WHERE identified_at = %s
-           ORDER BY score DESC""",
+        """SELECT s.code, s.name, s.pct_chg,
+                  CASE WHEN c.board_code IS NOT NULL THEN '概念'
+                       ELSE '行业' END AS type_cn
+           FROM candidate_stock s
+           LEFT JOIN (SELECT DISTINCT board_code FROM concept_daily) c
+             ON s.board_code = c.board_code
+           WHERE s.identified_at = %s
+           ORDER BY s.score DESC""",
         (latest,),
     )
     if df.empty:
         return _section(FEATURE_STOCK, f"识别日期 {latest} 无候选个股")
 
-    def _fmt_score(v):
-        if v is None or pd.isna(v):
-            return ""
-        return f"{float(v):.1f}"
-
-    rows = "".join(
-        f"<tr><td>{_n(r['code'])}</td><td>{_n(r['name'])}</td>"
-        f"<td>{_n(r['board_name']) or ''}</td>"
-        f"<td>{_n(r['open']) or ''}</td>"
-        f"<td>{_n(r['close']) or ''}</td>"
-        f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
-        f"<td>{_fmt_score(r['score'])}</td>"
-        f"<td>{_fmt_score(r['rps_20'])}</td>"
-        f"<td>{_fmt_score(r['rps_60'])}</td>"
-        f"<td>{_fmt_score(r['trend'])}</td>"
-        f"<td>{_fmt_score(r['momentum'])}</td>"
-        f"<td>{_fmt_score(r['volume_score'])}</td>"
-        f"<td>{_fmt_score(r['macd_score'])}</td>"
-        f"<td>{_fmt_score(r['sector_score'])}</td></tr>"
+    rows = [
+        [_txt(r["code"]), _txt(r["name"]), _pct_cell(r["pct_chg"]),
+         _txt(r["type_cn"])]
         for _, r in df.iterrows()
+    ]
+    html = (
+        _p(f"识别日期: <b>{latest}</b> (共 {len(df)} 条)")
+        + _label(f"全部候选 ({len(df)})")
+        + _table(_H4, rows, _W4, _A4)
     )
-    html_block = f"""
-    <p><b>全部候选 ({len(df)})</b></p>
-    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse">
-      <tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>板块</td>
-          <td>开盘</td><td>收盘</td><td>涨幅</td><td>总分</td>
-          <td>RPS20</td><td>RPS60</td><td>趋势</td><td>动量</td>
-          <td>量价</td><td>MACD</td><td>板块</td></tr>
-      {rows}
-    </table>
-    """
-
-    html = f"<p>识别日期: <b>{latest}</b> (共 {len(df)} 条)</p>" + html_block
     return _section(FEATURE_STOCK, html)
 
 
 def build_candidate_sector() -> str:
-    """候选板块: 从 candidate_sector 展示最新识别结果"""
+    """候选板块: 从 candidate_sector 展示最新识别结果 (只留代码/名称/当日涨幅/类型)"""
     latest = _latest_identified_at("candidate_sector")
     if not latest:
         return _section(FEATURE_SECTOR, "无数据")
 
     df = _query(
-        """SELECT board_code, board_name, close, pct_chg, chg_5d,
-                  amount, advance, decline, net_inflow
-           FROM candidate_sector WHERE identified_at = %s
-           ORDER BY chg_5d DESC""",
+        """SELECT s.board_code, s.board_name, s.pct_chg,
+                  CASE WHEN c.board_code IS NOT NULL THEN '概念'
+                       ELSE '行业' END AS type_cn
+           FROM candidate_sector s
+           LEFT JOIN (SELECT DISTINCT board_code FROM concept_daily) c
+             ON s.board_code = c.board_code
+           WHERE s.identified_at = %s
+           ORDER BY s.chg_5d DESC""",
         (latest,),
     )
     if df.empty:
         return _section(FEATURE_SECTOR, f"识别日期 {latest} 无候选板块")
 
-    rows = "".join(
-        f"<tr><td>{_n(r['board_code'])}</td><td>{_n(r['board_name'])}</td>"
-        f"<td>{_n(r['close']) or ''}</td>"
-        f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
-        f"<td>{_n(r['chg_5d']) or ''}%</td>"
-        f"<td>{_n(r['amount']) and round(r['amount'] / 1e8, 2)}亿</td></tr>"
+    rows = [
+        [_txt(r["board_code"]), _txt(r["board_name"]), _pct_cell(r["pct_chg"]),
+         _txt(r["type_cn"])]
         for _, r in df.iterrows()
+    ]
+    html = (
+        _p(f"识别日期: <b>{latest}</b> (共 {len(df)} 个)")
+        + _table(_H4, rows, _W4, _A4)
     )
-    html = f"""
-    <p>识别日期: <b>{latest}</b> (共 {len(df)} 个)</p>
-    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse">
-      <tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>收盘</td>
-          <td>当日涨幅</td><td>5日涨幅</td><td>成交额(亿)</td></tr>
-      {rows}
-    </table>
-    """
     return _section(FEATURE_SECTOR, html)
 
 
@@ -290,36 +394,32 @@ def build_volume_price() -> str:
     sig_txt = (f"天量 {int(s['peak'] or 0)} 只, 地量 {int(s['trough'] or 0)} 只, "
                f"顶背离{int(s['topdiv'] or 0)} 只, 底背离{int(s['botdiv'] or 0)} 只")
 
-    def _v(v, suffix=""):
-        return "" if v is None or pd.isna(v) else f"{v}{suffix}"
-
-    rows = "".join(
-        f"<tr><td>{_n(r['code'])}</td><td>{_n(r['name'])}</td>"
-        f"<td>{_n(r['board_name']) or ''}</td>"
-        f"<td>{_n(r['close']) or ''}</td>"
-        f"<td style='color:{_red_green(r['pct_chg'])}'>{_v(r['pct_chg'], '%')}</td>"
-        f"<td>{_v(r['vol_ratio_5'])}</td>"
-        f"<td>{_v(r['vol_trend'])}</td>"
-        f"<td>{_v(r['position_60d'])}</td>"
-        f"<td>{_v(r['vol_pattern'])}"
-        + (" 天量" if r["is_volume_peak"] else "")
-        + (" 地量" if r["is_volume_trough"] else "")
-        + f"</td><td>{_v(r['divergence'])}</td>"
-        f"<td><b>{_v(r['vp_score'])}</b></td></tr>"
+    rows = [
+        [_txt(r["code"]), _txt(r["name"]), _txt(r["board_name"]),
+         _num(r["close"], 2), _pct_cell(r["pct_chg"]),
+         _num(r["vol_ratio_5"], 2), _txt(r["vol_trend"]),
+         _num(r["position_60d"], 1),
+         _txt(r["vol_pattern"])
+         + (" 天量" if r["is_volume_peak"] else "")
+         + (" 地量" if r["is_volume_trough"] else ""),
+         _txt(r["divergence"]), f"<b>{_num(r['vp_score'], 2)}</b>"]
         for _, r in df.iterrows()
+    ]
+    html = (
+        _p(f"交易日 <b>{latest}</b> (全市场 {int(total)} 只)")
+        + _info(f"<b>形态分布:</b> {dist_txt}")
+        + _info(f"<b>信号统计:</b> {sig_txt}")
+        + _label(f"评分 TOP{len(df)} (婴儿肥5)")
+        + _table(
+            ["代码", "名称", "板块", "收盘", "涨幅", "量比", "量能",
+             "60日位置", "形态", "背离", "得分"],
+            rows,
+            [9, 12, 13, 8, 8, 7, 7, 9, 12, 8, 7],
+            ["center", "left", "left", "right", "right", "right", "center",
+             "right", "center", "center", "right"],
+            compact=True,
+        )
     )
-    html = f"""
-    <p>交易日 <b>{latest}</b> (全市场 {int(total)} 只)</p>
-    <p><b>形态分布:</b> {dist_txt}</p>
-    <p><b>信号统计:</b> {sig_txt}</p>
-    <p><b>评分 TOP{len(df)} (婴儿肥5)</b></p>
-    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse">
-      <tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>板块</td>
-          <td>收盘</td><td>涨幅</td><td>量比</td><td>量能</td><td>60日位置</td>
-          <td>形态</td><td>背离</td><td>得分</td></tr>
-      {rows}
-    </table>
-    """
     return _section(FEATURE_VOLUME, html)
 
 
@@ -338,22 +438,21 @@ def build_candidate_etf() -> str:
     if df.empty:
         return _section(FEATURE_ETF, f"识别日期 {latest} 无候选ETF")
 
-    rows = "".join(
-        f"<tr><td>{_n(r['code'])}</td><td>{_n(r['name'])}</td>"
-        f"<td>{_n(r['close']) or ''}</td>"
-        f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
-        f"<td>{_n(r['chg_5d']) or ''}%</td>"
-        f"<td>{_n(r['amount']) and round(r['amount'] / 1e8, 2)}亿</td></tr>"
+    def _amt(v):
+        n = _n(v)
+        return "" if n is None else f"{round(float(n) / 1e8, 2)}亿"
+
+    rows = [
+        [_txt(r["code"]), _txt(r["name"]), _num(r["close"], 2),
+         _pct_cell(r["pct_chg"]), _pct_cell(r["chg_5d"]), _amt(r["amount"])]
         for _, r in df.iterrows()
+    ]
+    html = (
+        _p(f"识别日期: <b>{latest}</b> (共 {len(df)} 只)")
+        + _table(["代码", "名称", "收盘", "当日涨幅", "5日涨幅", "成交额(亿)"],
+                 rows, [15, 24, 14, 16, 15, 16],
+                 ["center", "left", "right", "right", "right", "right"])
     )
-    html = f"""
-    <p>识别日期: <b>{latest}</b> (共 {len(df)} 只)</p>
-    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse">
-      <tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>收盘</td>
-          <td>当日涨幅</td><td>5日涨幅</td><td>成交额(亿)</td></tr>
-      {rows}
-    </table>
-    """
     return _section(FEATURE_ETF, html)
 
 
@@ -370,70 +469,54 @@ def build_volrise() -> str:
 
     if latest_s:
         sdf = _query(
-            """SELECT board_code, board_name, board_type, `date`, pct_chg,
-                      vol_ring_pct, hit_days, ret_3d
+            """SELECT board_code, board_name, board_type, pct_chg
                  FROM candidate_sector_volrise
-                 WHERE identified_at = %s
-                 ORDER BY ret_3d DESC LIMIT 15""",
+                WHERE identified_at = %s
+                ORDER BY pct_chg DESC LIMIT 15""",
             (latest_s,),
         )
         if not sdf.empty:
-            srows = "".join(
-                f"<tr><td>{_n(r['board_code'])}</td><td>{_n(r['board_name'])}</td>"
-                f"<td>{type_cn.get(r['board_type'], r['board_type'])}</td>"
-                f"<td>{_n(r['date'])}</td>"
-                f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
-                f"<td>{_n(r['vol_ring_pct']) or ''}%</td>"
-                f"<td>{_n(r['hit_days'])}/3</td>"
-                f"<td>{_n(r['ret_3d']) or ''}%</td></tr>"
+            srows = [
+                [_txt(r["board_code"]), _txt(r["board_name"]),
+                 _pct_cell(r["pct_chg"]),
+                 type_cn.get(r["board_type"], r["board_type"])]
                 for _, r in sdf.iterrows()
-            )
+            ]
             parts.append(
-                f"<p><b>候选板块</b> ({len(sdf)} 个, 近3日涨幅TOP{len(sdf)})</p>"
-                '<table border="1" cellspacing="0" cellpadding="6" '
-                'style="border-collapse:collapse">'
-                '<tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>类型</td>'
-                '<td>窗口末日</td><td>当日涨幅</td><td>量环比</td><td>满足天数</td>'
-                f"<td>3日涨幅</td></tr>{srows}</table>"
+                _label(f"候选板块 ({len(sdf)} 个)")
+                + _table(_H4, srows, _W4, _A4)
             )
 
     if latest_t:
         tdf = _query(
-            """SELECT code, name, board_name, `date`, pct_chg, vol_ring_pct,
-                      sector_pct_chg, hit_days, ret_3d
-                 FROM candidate_stock_volrise
-                 WHERE identified_at = %s
-                 ORDER BY vol_ring_pct DESC LIMIT 20""",
+            """SELECT t.code, t.name, t.pct_chg,
+                      CASE WHEN c.board_code IS NOT NULL THEN '概念'
+                           ELSE '行业' END AS type_cn
+                 FROM candidate_stock_volrise t
+                 LEFT JOIN (SELECT DISTINCT board_code FROM concept_daily) c
+                   ON t.board_code = c.board_code
+                WHERE t.identified_at = %s
+                ORDER BY t.pct_chg DESC LIMIT 20""",
             (latest_t,),
         )
         if not tdf.empty:
-            trows = "".join(
-                f"<tr><td>{_n(r['code'])}</td><td>{_n(r['name'])}</td>"
-                f"<td>{_n(r['board_name'])}</td>"
-                f"<td>{_n(r['date'])}</td>"
-                f"<td style='color:{_red_green(r['pct_chg'])}'>{_n(r['pct_chg']) or ''}%</td>"
-                f"<td>{_n(r['vol_ring_pct']) or ''}%</td>"
-                f"<td>{_n(r['sector_pct_chg']) or ''}%</td>"
-                f"<td>{_n(r['hit_days'])}/3</td>"
-                f"<td>{_n(r['ret_3d']) or ''}%</td></tr>"
+            trows = [
+                [_txt(r["code"]), _txt(r["name"]), _pct_cell(r["pct_chg"]),
+                 _txt(r["type_cn"])]
                 for _, r in tdf.iterrows()
-            )
+            ]
             parts.append(
-                f"<p><b>候选个股</b> ({len(tdf)} 只, 量环比TOP{len(tdf)})</p>"
-                '<table border="1" cellspacing="0" cellpadding="6" '
-                'style="border-collapse:collapse">'
-                '<tr bgcolor="#f0f0f0"><td>代码</td><td>名称</td><td>板块</td>'
-                '<td>窗口末日</td><td>当日涨幅</td><td>个股量环比</td>'
-                '<td>板块涨幅</td><td>满足天数</td>'
-                f"<td>3日涨幅</td></tr>{trows}</table>"
+                _label(f"候选个股 ({len(tdf)} 只)")
+                + _table(_H4, trows, _W4, _A4)
             )
 
     if not parts:
         return _section(FEATURE_VOLRISE, f"识别日期 {latest} 无量增价涨候选")
 
     html = (
-        f"<p>识别日期: <b>{latest}</b> (板块: 近3日每天涨幅>0且量环比>=-20%; "
-        "个股: 近3日每天涨幅>0且板块涨幅>0，不做量环比)</p>" + "".join(parts)
+        _p(f"识别日期: <b>{latest}</b> (板块: 近3日每天涨幅>0且量环比>=-20%; "
+           "个股: 近3日每天涨幅>0且板块涨幅>0，不做量环比)")
+        + "".join(parts)
     )
     return _section(FEATURE_VOLRISE, html)
 
@@ -486,17 +569,20 @@ def build_email(recipient: str, features: list) -> str:
                 sections.append(build_candidate_etf())
 
     body = "\n".join(sections)
-    html = f"""
-    <html><body style="font-family:Microsoft YaHei,Arial;font-size:14px">
-    <h2 style="text-align:center">A股数据日报 {today}</h2>
-    <p>收件人: {recipient}</p>
-    <p>本邮件由系统自动生成，仅供参考，不构成投资建议。</p>
-    <hr>
-    {body}
-    <hr>
-    <p style="color:#888;font-size:12px">发送时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    </body></html>
-    """
+    html = f"""<html>
+<body style="margin:0;padding:0;background-color:#ffffff">
+<div style="max-width:{_TABLE_W}px;margin:0 auto;padding:16px 12px;
+            font-family:Microsoft YaHei,Arial,sans-serif;font-size:14px;color:#333333">
+  <h2 style="margin:0 0 6px;text-align:center;font-size:20px;color:#1f3b54">A股数据日报 {today}</h2>
+  <p style="margin:0 0 2px;text-align:center;color:#888888;font-size:12px">收件人: {recipient}</p>
+  <p style="margin:0 0 10px;text-align:center;color:#888888;font-size:12px">本邮件由系统自动生成，仅供参考，不构成投资建议。</p>
+  <hr style="border:none;border-top:2px solid #3d566e;margin:12px 0">
+  {body}
+  <hr style="border:none;border-top:1px solid #dde3e9;margin:16px 0 8px">
+  <p style="margin:0;color:#999999;font-size:12px;text-align:center">发送时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+</div>
+</body></html>
+"""
     return html
 
 
