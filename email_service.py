@@ -146,6 +146,8 @@ _TH_STYLE = ("border:1px solid #ccd4dc;background-color:#3d566e;"
 
 # 4列候选表 (候选板块/候选个股/量增价涨) 统一列宽与对齐, 保证各板块表格上下对齐
 _H4 = ["代码", "名称", "当日涨幅", "类型"]
+# 候选个股表: 第4列显示个股所属行业名称 (而非"行业/概念"标签)
+_H4_STOCK = ["代码", "名称", "当日涨幅", "所属行业"]
 _W4 = [16, 34, 26, 24]
 _A4 = ["center", "left", "right", "center"]
 
@@ -295,12 +297,8 @@ def build_candidate_stock() -> str:
         return _section(FEATURE_STOCK, "无数据")
 
     df = _query(
-        """SELECT s.code, s.name, s.pct_chg,
-                  CASE WHEN c.board_code IS NOT NULL THEN '概念'
-                       ELSE '行业' END AS type_cn
+        """SELECT s.code, s.name, s.pct_chg, s.board_name AS industry_name
            FROM candidate_stock s
-           LEFT JOIN (SELECT DISTINCT board_code FROM concept_daily) c
-             ON s.board_code = c.board_code
            WHERE s.identified_at = %s
            ORDER BY s.score DESC""",
         (latest,),
@@ -310,13 +308,13 @@ def build_candidate_stock() -> str:
 
     rows = [
         [_txt(r["code"]), _txt(r["name"]), _pct_cell(r["pct_chg"]),
-         _txt(r["type_cn"])]
+         _txt(r["industry_name"])]
         for _, r in df.iterrows()
     ]
     html = (
         _p(f"识别日期: <b>{latest}</b> (共 {len(df)} 条)")
         + _label(f"全部候选 ({len(df)})")
-        + _table(_H4, rows, _W4, _A4)
+        + _table(_H4_STOCK, rows, _W4, _A4)
     )
     return _section(FEATURE_STOCK, html)
 
@@ -489,12 +487,8 @@ def build_volrise() -> str:
 
     if latest_t:
         tdf = _query(
-            """SELECT t.code, t.name, t.pct_chg,
-                      CASE WHEN c.board_code IS NOT NULL THEN '概念'
-                           ELSE '行业' END AS type_cn
+            """SELECT t.code, t.name, t.pct_chg, t.board_name AS industry_name
                  FROM candidate_stock_volrise t
-                 LEFT JOIN (SELECT DISTINCT board_code FROM concept_daily) c
-                   ON t.board_code = c.board_code
                 WHERE t.identified_at = %s
                 ORDER BY t.pct_chg DESC LIMIT 20""",
             (latest_t,),
@@ -502,12 +496,12 @@ def build_volrise() -> str:
         if not tdf.empty:
             trows = [
                 [_txt(r["code"]), _txt(r["name"]), _pct_cell(r["pct_chg"]),
-                 _txt(r["type_cn"])]
+                 _txt(r["industry_name"])]
                 for _, r in tdf.iterrows()
             ]
             parts.append(
                 _label(f"候选个股 ({len(tdf)} 只)")
-                + _table(_H4, trows, _W4, _A4)
+                + _table(_H4_STOCK, trows, _W4, _A4)
             )
 
     if not parts:
