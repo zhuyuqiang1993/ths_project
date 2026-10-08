@@ -54,3 +54,15 @@ def latest_trade_date() -> Optional[str]:
     cal = _load_calendar()
     candidates = [d for d in cal if d <= today]
     return max(candidates) if candidates else None
+
+
+def today_anchor() -> str:
+    """当日时间锚点: 今天是交易日则返回今天, 否则返回最近交易日 (<= 今天)。
+
+    所有模块统一用它取锚点, 避免各自缓存日期或从库里取 MAX(date) 导致锚点滞后。
+    每次调用都实时计算, 长驻进程不会拿到过期日期。
+    """
+    today = date.today().strftime("%Y-%m-%d")
+    if today in _load_calendar():
+        return today
+    return latest_trade_date() or today

@@ -329,16 +329,24 @@ def run(analysis_date: str = "") -> pd.DataFrame:
     """量价分析主入口: 分析 -> 入库 -> 输出
 
     Args:
-        analysis_date: 分析锚点 (YYYY-MM-DD), 默认 stock_daily 最新交易日
+        analysis_date: 分析锚点 (YYYY-MM-DD), 默认当日最新交易日 (today_anchor)
     """
     create_tables()
 
-    if not analysis_date:
-        df_anchor = _query("SELECT MAX(`date`) AS d FROM stock_daily")
-        if df_anchor.empty or df_anchor["d"].isna().all():
-            logger.warning("stock_daily 无数据, 量价分析跳过")
-            return pd.DataFrame()
-        analysis_date = str(df_anchor["d"].iloc[0])
+    # 锚点统一取当日最新交易日; 库内尚无当日数据时回退到库内最新 (并告警)
+    from trade_calendar import today_anchor
+    analysis_date = analysis_date or today_anchor()
+    df_anchor = _query(
+        "SELECT MAX(`date`) AS d FROM stock_daily WHERE `date` <= %s",
+        (analysis_date,),
+    )
+    if df_anchor.empty or df_anchor["d"].isna().all():
+        logger.warning("stock_daily 无数据, 量价分析跳过")
+        return pd.DataFrame()
+    latest = str(df_anchor["d"].iloc[0])
+    if latest != analysis_date:
+        logger.warning(f"stock_daily 尚无 {analysis_date} 数据, 锚点回退到库内最新 {latest}")
+        analysis_date = latest
 
     logger.info(f"===== 量价分析开始 (交易日 {analysis_date}) =====")
     data = load_window(analysis_date)

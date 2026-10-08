@@ -50,7 +50,9 @@ _SESSION = requests.Session()
 _SESSION.verify = False
 _SESSION.trust_env = True
 
-TODAY = datetime.now().strftime("%Y-%m-%d")
+def _today() -> str:
+    """当日日期 (每次调用实时计算, 避免长驻进程拿到导入时的过期日期)。"""
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -93,7 +95,7 @@ def fetch_all_quotes(stock_list: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     candles_cache = getattr(fetch_all_quotes, "candles_cache", {})
-    today = TODAY
+    today = _today()
     rows = []
     for _, q in df.iterrows():
         c = q["code"]
@@ -312,7 +314,7 @@ def run(start_date: str = None, end_date: str = None, force: bool = False,
         e = datetime.strptime(end_date, "%Y-%m-%d")
         raw_dates = [(s + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((e - s).days + 1)]
     else:
-        raw_dates = [start_date or end_date or TODAY]
+        raw_dates = [start_date or end_date or _today()]
 
     # 跳过周末与中国法定节假日, 仅处理交易日
     from trade_calendar import get_trade_dates
@@ -321,7 +323,7 @@ def run(start_date: str = None, end_date: str = None, force: bool = False,
         logger.warning("所选日期区间内无交易日, 跳过更新")
         return pd.DataFrame()
 
-    is_today = len(target_dates) == 1 and target_dates[0] == TODAY
+    is_today = len(target_dates) == 1 and target_dates[0] == _today()
 
     # 增量优化: 非当日数据, 检查DB中是否已有目标日期范围的数据, 有则跳过API调用
     if not is_today and not force:

@@ -147,32 +147,28 @@ def _has_recent_days(table: str, dates: list) -> bool:
 
 
 def run_updates(anchor: str | None):
-    """数据更新: 板块 -> 个股 -> ETF (增量, 避免全量重拉)。
+    """数据更新: 板块 -> 个股 -> ETF -> 指数 (增量, 避免全量重拉)。
 
-    - 交易日 15:30 之前: 锚点为上一个已完成交易日, 强制刷新近5个交易日窗口
+    - 时间锚点统一取当日 (today_anchor), 不再回退到上一个交易日
+    - 交易日 15:30 之前: 强制拉取当日盘中快照 (近ENSURE_WINDOW_DAYS个交易日窗口)
     - 收盘后: 先预检当天数据是否缺失, 缺则补拉; 再做完整性判断和增量更新
     """
     today_str = date.today().strftime("%Y-%m-%d")
     try:
-        from trade_calendar import is_trade_date, get_trade_dates
+        from trade_calendar import is_trade_date, today_anchor
         is_today_trade = is_trade_date(today_str)
     except Exception:
         is_today_trade = False
 
+    # 所有模块统一锚点: 当日 (今天是交易日) 或最近交易日
+    eff_anchor = anchor or today_anchor()
+
     if is_today_trade and _before_market_close():
-        # 盘中: 锚点用上一个已完成交易日 (今天数据不完整, 不宜做锚点)
-        # 不预检今天, 盘中数据不完整, 不需要拉
-        force_refresh = True
-        try:
-            all_dates = get_trade_dates("2026-01-01", today_str)
-            eff_anchor = all_dates[-2] if len(all_dates) >= 2 else anchor or today_str
-        except Exception:
-            eff_anchor = anchor or today_str
+        force_refresh = True   # 盘中: 每次都刷新当日快照
     else:
         # 收盘后: 先预检当天数据, 缺则补拉
         _fetch_today_if_missing()
         force_refresh = False
-        eff_anchor = anchor or today_str
 
     if not eff_anchor:
         logger.warning("无交易日锚点, 跳过数据更新")
@@ -250,40 +246,48 @@ def _import_run(module: str, **kwargs):
     return mod.run(**kwargs)
 
 
-def run_screens():
-    """筛选与分析: 板块 -> 股票 -> ETF -> 量价分析 -> 量增价涨"""
-    logger.info("===== [A] 板块筛选 =====")
+def run_screens(anchor: str = ""):
+    """筛选与分析: 板块 -> 股票 -> ETF -> 量价分析 -> 量增价涨
+
+    Args:
+        anchor: 时间锚点 (YYYY-MM-DD), 统一传当日, 各模块不再自行取库内最新日期
+    """
+    if not anchor:
+        from trade_calendar import today_anchor
+        anchor = today_anchor()
+
+    logger.info(f"===== [A] 板块筛选 (锚点 {anchor}) =====")
     try:
         from sector_screen import run as sector_screen_run
-        sector_screen_run()
+        sector_screen_run(identified_date=anchor)
     except Exception as e:
         logger.error(f"板块筛选失败: {e}")
 
-    logger.info("===== [B] 股票筛选 =====")
+    logger.info(f"===== [B] 股票筛选 (锚点 {anchor}) =====")
     try:
         from stock_screen import run as stock_screen_run
-        stock_screen_run()
+        stock_screen_run(identified_date=anchor)
     except Exception as e:
         logger.error(f"股票筛选失败: {e}")
 
-    logger.info("===== [C] ETF筛选 =====")
+    logger.info(f"===== [C] ETF筛选 (锚点 {anchor}) =====")
     try:
         from etf_screen import run as etf_screen_run
-        etf_screen_run()
+        etf_screen_run(identified_date=anchor)
     except Exception as e:
         logger.error(f"ETF筛选失败: {e}")
 
-    logger.info("===== [D] 量价分析 =====")
+    logger.info(f"===== [D] 量价分析 (锚点 {anchor}) =====")
     try:
         from volume_price import run as volume_price_run
-        volume_price_run()
+        volume_price_run(analysis_date=anchor)
     except Exception as e:
         logger.error(f"量价分析失败: {e}")
 
-    logger.info("===== [E] 量增价涨筛选 =====")
+    logger.info(f"===== [E] 量增价涨筛选 (锚点 {anchor}) =====")
     try:
         from volrise_screen import run as volrise_run
-        volrise_run()
+        volrise_run(anchor=anchor)
     except Exception as e:
         logger.error(f"量增价涨筛选失败: {e}")
 
@@ -301,10 +305,11 @@ def send_daily_email():
 def job():
     t0 = time.time()
     logger.info("=== 每日定时任务开始 ===")
-    anchor = latest_trade_date()
-    logger.info(f"最近交易日锚点: {anchor}")
+    from trade_calendar import today_anchor
+    anchor = today_anchor()
+    logger.info(f"当日时间锚点: {anchor}")
     run_updates(anchor)
-    run_screens()
+    run_screens(anchor)
     send_daily_email()
     logger.info(f"=== 每日定时任务结束 (耗时 {round(time.time() - t0, 1)}s) ===")
 

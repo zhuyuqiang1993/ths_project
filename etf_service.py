@@ -34,8 +34,6 @@ logger.add(
 _SESSION = requests.Session()
 _SESSION.verify = False
 
-TODAY = datetime.now().strftime("%Y-%m-%d")
-
 COL_CODE = "code"
 COL_NAME = "name"
 COL_DATE = "date"

@@ -319,17 +319,30 @@ def _purge_identified(identified_at: str):
         conn.close()
 
 
-def run(identified_at: str = ""):
-    """量增价涨筛选入口: 扫描 -> 入库(独立新表) -> 日志输出"""
+def run(identified_at: str = "", anchor: str = ""):
+    """量增价涨筛选入口: 扫描 -> 入库(独立新表) -> 日志输出
+
+    Args:
+        identified_at: 识别日期 (YYYY-MM-DD), 默认当日
+        anchor: 时间锚点 (YYYY-MM-DD), 默认当日最新交易日 (today_anchor)
+    """
     create_tables()
     identified_at = identified_at or date.today().isoformat()
     logger.info(f"===== 量增价涨筛选开始 (识别日期: {identified_at}) =====")
 
-    df_anchor = _query("SELECT MAX(`date`) AS d FROM stock_daily")
+    # 时间锚点统一取当日最新, 库内无当日数据时回退到库内最新 (并告警)
+    if not anchor:
+        from trade_calendar import today_anchor
+        anchor = today_anchor()
+    df_anchor = _query(
+        "SELECT MAX(`date`) AS d FROM stock_daily WHERE `date` <= %s", (anchor,))
     if df_anchor.empty or df_anchor["d"].isna().all():
         logger.warning("stock_daily 无数据, 量增价涨筛选跳过")
         return pd.DataFrame(), pd.DataFrame()
-    anchor = str(df_anchor["d"].iloc[0])
+    latest = str(df_anchor["d"].iloc[0])
+    if latest != anchor:
+        logger.warning(f"stock_daily 尚无 {anchor} 数据, 锚点回退到库内最新 {latest}")
+        anchor = latest
 
     window_dates = load_window_dates(anchor)
     if not window_dates:
