@@ -302,6 +302,19 @@ def send_daily_email():
         logger.error(f"邮件发送失败: {e}")
 
 
+def export_candidate_files(anchor: str = ""):
+    """导出候选代码到桌面 txt: 候选股票.txt / 候选板块.txt / 候选etf.txt (同名覆盖)
+
+    候选股票不含3倍量法; 某类无候选时保留桌面原有文件, 不写空文件。
+    """
+    logger.info("===== [G] 导出候选代码到桌面 =====")
+    try:
+        from export_candidates import run as export_run
+        export_run(anchor)
+    except Exception as e:
+        logger.error(f"候选代码导出失败: {e}")
+
+
 def job():
     t0 = time.time()
     logger.info("=== 每日定时任务开始 ===")
@@ -311,6 +324,7 @@ def job():
     run_updates(anchor)
     run_screens(anchor)
     send_daily_email()
+    export_candidate_files(anchor)
     logger.info(f"=== 每日定时任务结束 (耗时 {round(time.time() - t0, 1)}s) ===")
 
 
